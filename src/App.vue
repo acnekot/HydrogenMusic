@@ -1,5 +1,5 @@
 <script setup>
-import { defineAsyncComponent, onMounted, onUnmounted } from 'vue';
+import { defineAsyncComponent, computed, onMounted, onUnmounted } from 'vue';
 import Home from './views/Home.vue';
 import Title from './components/Title.vue';
 import SearchInput from './components/SearchInput.vue';
@@ -40,10 +40,57 @@ onUnmounted(() => {
 const handleTitleBarDoubleClick = () => {
     windowApi.windowMax('window-max');
 };
+
+// 自定义背景
+const customBackgroundActive = computed(
+    () => playerStore.customBackgroundEnabled && playerStore.customBackgroundApplyToChrome && !!playerStore.customBackgroundImage
+);
+
+const customBackgroundStyle = computed(() => {
+    if (!customBackgroundActive.value) return {};
+    const rawPath = playerStore.customBackgroundImage;
+    if (!rawPath) return {};
+
+    let normalizedPath = rawPath.replace(/\\/g, '/');
+    if (!normalizedPath.startsWith('file://')) {
+        if (/^[a-zA-Z]:\//.test(normalizedPath)) {
+            normalizedPath = `/${normalizedPath}`;
+        }
+        normalizedPath = `file://${normalizedPath}`;
+    }
+
+    const escapedUrl = normalizedPath.replace(/"/g, '\\"');
+    const mode = playerStore.customBackgroundMode;
+    let size = 'cover';
+    let repeat = 'no-repeat';
+    let position = 'center center';
+
+    if (mode === 'stretch') {
+        size = '100% 100%';
+    } else if (mode === 'contain') {
+        size = 'contain';
+    } else if (mode === 'center') {
+        size = 'auto';
+    } else {
+        size = 'cover';
+    }
+
+    const blurValue = Math.max(0, Number(playerStore.customBackgroundBlur) || 0);
+    const brightnessValue = Math.max(0, Number(playerStore.customBackgroundBrightness) || 100);
+
+    return {
+        '--custom-background-image': `url("${escapedUrl}")`,
+        '--custom-background-size': size,
+        '--custom-background-repeat': repeat,
+        '--custom-background-position': position,
+        '--custom-background-blur': `${blurValue}px`,
+        '--custom-background-brightness': `${brightnessValue}%`,
+    };
+});
 </script>
 
 <template>
-    <div class="mainWindow">
+    <div class="mainWindow" :class="{ 'mainWindow--custom': customBackgroundActive }" :style="customBackgroundStyle">
         <Transition name="home">
             <Home class="home" v-show="playerStore.widgetState"></Home>
         </Transition>
@@ -105,6 +152,8 @@ const handleTitleBarDoubleClick = () => {
 .mainWindow {
     width: 100%;
     height: 100%;
+    position: relative;
+    overflow: hidden;
     background: linear-gradient(rgba(176, 209, 217, 0.9) -20%, rgba(176, 209, 217, 0.4) 50%, rgba(176, 209, 217, 0.9) 120%);
     opacity: 0;
     animation: mainWindows-starting 0.8s cubic-bezier(0.14, 0.91, 0.58, 1) forwards;
@@ -123,6 +172,25 @@ const handleTitleBarDoubleClick = () => {
     .home {
         height: calc(100% - 78px);
     }
+}
+.mainWindow--custom {
+    background: transparent;
+}
+.mainWindow--custom::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: var(--custom-background-image);
+    background-size: var(--custom-background-size, cover);
+    background-repeat: var(--custom-background-repeat, no-repeat);
+    background-position: var(--custom-background-position, center center);
+    filter: blur(var(--custom-background-blur, 0px)) brightness(var(--custom-background-brightness, 100%));
+    transform: scale(1.05);
+    z-index: 0;
+}
+.mainWindow--custom > * {
+    position: relative;
+    z-index: 1;
 }
 .globalWidget {
     display: flex;

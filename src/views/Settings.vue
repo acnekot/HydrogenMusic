@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onActivated, onBeforeUnmount, watch } from 'vue'
+import { computed, ref, onActivated, onBeforeUnmount, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { noticeOpen, dialogOpen } from '@/utils/dialog'
 import { applySettingsSnapshot, initSettings } from '@/utils/initApp'
@@ -137,12 +137,27 @@ const applySettingsToForm = settings => {
     shortcutsList.value = settings.shortcuts
     globalShortcuts.value = settings.other.globalShortcuts
     quitApp.value = settings.other.quitApp
+    // 自定义背景读取（含兼容旧字段）
+    const cb = settings.customBackground || {}
+    const cbEnabled = cb.enabled ?? settings.customBackgroundEnabled
+    const cbImage = cb.image ?? settings.customBackgroundImage
+    const cbMode = cb.mode ?? settings.customBackgroundMode
+    const cbBlur = cb.blur ?? settings.customBackgroundBlur
+    const cbBrightness = cb.brightness ?? settings.customBackgroundBrightness
+    const cbApplyToChrome = cb.applyToChrome ?? settings.customBackgroundApplyToChrome
+    const cbApplyToPlayer = cb.applyToPlayer ?? settings.customBackgroundApplyToPlayer
+    if (typeof cbEnabled !== 'undefined') playerStore.customBackgroundEnabled = !!cbEnabled
+    if (typeof cbImage !== 'undefined') playerStore.customBackgroundImage = cbImage || ''
+    if (typeof cbMode !== 'undefined') playerStore.customBackgroundMode = cbMode || 'cover'
+    if (typeof cbBlur !== 'undefined') playerStore.customBackgroundBlur = Number(cbBlur) || 0
+    if (typeof cbBrightness !== 'undefined') playerStore.customBackgroundBrightness = Number(cbBrightness) || 100
+    if (typeof cbApplyToChrome !== 'undefined') playerStore.customBackgroundApplyToChrome = !!cbApplyToChrome
+    if (typeof cbApplyToPlayer !== 'undefined') playerStore.customBackgroundApplyToPlayer = !!cbApplyToPlayer
 }
 
 onActivated(() => {
     void getSettingsSnapshot().then(settings => {
         applySettingsToForm(settings)
-    })
 
     // Initialize theme selection
     try {
@@ -228,6 +243,15 @@ const setAppSettings = () => {
             globalShortcuts: globalShortcuts.value,
             quitApp: quitApp.value,
         },
+        customBackground: {
+            enabled: playerStore.customBackgroundEnabled,
+            image: playerStore.customBackgroundImage,
+            mode: playerStore.customBackgroundMode,
+            blur: playerStore.customBackgroundBlur,
+            brightness: playerStore.customBackgroundBrightness,
+            applyToChrome: playerStore.customBackgroundApplyToChrome,
+            applyToPlayer: playerStore.customBackgroundApplyToPlayer,
+        },
     }
 
     const snapshot = setCachedSettingsSnapshot(settings)
@@ -238,6 +262,357 @@ const setAppSettings = () => {
 
 // apply theme immediately when user changes
 watch(theme, val => setTheme(val))
+
+// ============================================================================
+// 自定义背景 + 歌词音频可视化（来自 fork）
+// ============================================================================
+const clampNumber = (value, min, max, fallback = min) => {
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric)) return fallback
+    if (numeric < min) return min
+    if (numeric > max) return max
+    return numeric
+}
+
+const lyricVisualizerDefaults = Object.freeze({
+    height: 220,
+    frequencyMin: 20,
+    frequencyMax: 8000,
+    transitionDelay: 0.75,
+    barCount: 48,
+    barWidth: 55,
+    color: 'black',
+    opacity: 100,
+    style: 'bars',
+    radialSize: 100,
+    radialOffsetX: 0,
+    radialOffsetY: 0,
+    radialCoreSize: 62,
+})
+
+const customBackgroundDefaults = Object.freeze({
+    mode: 'cover',
+    blur: 0,
+    brightness: 100,
+    applyToChrome: true,
+    applyToPlayer: true,
+})
+
+const toDisplayNumber = (value, fractionDigits = 0) => {
+    if (!Number.isFinite(value)) return ''
+    if (fractionDigits <= 0) return String(Math.round(value))
+    return Number(value)
+        .toFixed(fractionDigits)
+        .replace(/\.0+$/, '')
+        .replace(/(\.\d*?)0+$/, '$1')
+}
+
+const formatOptionLabel = (value, unit, defaultValue, fractionDigits = 0) => {
+    const numberText = toDisplayNumber(value, fractionDigits)
+    return `${numberText}${unit}${value === defaultValue ? '（默认）' : ''}`
+}
+
+const addChoiceValue = (listRef, value) => {
+    if (!Number.isFinite(value)) return
+    if (!listRef.value.includes(value)) {
+        listRef.value = [...listRef.value, value].sort((a, b) => a - b)
+    }
+}
+
+const removeChoiceValue = (listRef, value) => {
+    if (!Number.isFinite(value)) return
+    listRef.value = listRef.value.filter(item => item !== value)
+}
+
+const createCustomActionState = (inputRef, sanitizeFn, valuesRef) =>
+    computed(() => {
+        const raw = String(inputRef.value ?? '').trim()
+        if (!raw) return { mode: 'add', value: null, exists: false }
+        const safe = sanitizeFn(raw)
+        if (!Number.isFinite(safe)) return { mode: 'add', value: null, exists: false }
+        const exists = valuesRef.value.includes(safe)
+        return { mode: exists ? 'remove' : 'add', value: safe, exists }
+    })
+
+const sanitizeHeight = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return lyricVisualizerDefaults.height
+    return Math.max(1, Math.round(n))
+}
+const sanitizeFrequencyMin = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return lyricVisualizerDefaults.frequencyMin
+    return clampNumber(Math.round(n), 20, 20000, lyricVisualizerDefaults.frequencyMin)
+}
+const sanitizeFrequencyMax = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return lyricVisualizerDefaults.frequencyMax
+    return clampNumber(Math.round(n), 20, 20000, lyricVisualizerDefaults.frequencyMax)
+}
+const sanitizeFrequencyRange = (min, max) => {
+    let safeMin = sanitizeFrequencyMin(min)
+    let safeMax = sanitizeFrequencyMax(max)
+    if (safeMin >= safeMax) {
+        if (safeMin >= 19990) { safeMin = 19990; safeMax = 20000 }
+        else safeMax = Math.min(20000, safeMin + 10)
+    }
+    if (safeMax - safeMin < 10) {
+        if (safeMin >= 19990) { safeMin = 19990; safeMax = 20000 }
+        else safeMax = Math.min(20000, safeMin + 10)
+    }
+    return { min: safeMin, max: safeMax }
+}
+const sanitizeBarCount = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return lyricVisualizerDefaults.barCount
+    return Math.max(1, Math.round(n))
+}
+const sanitizeBarWidth = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return lyricVisualizerDefaults.barWidth
+    return Math.max(1, Math.round(n))
+}
+const sanitizeVisualizerStyle = value => (value === 'radial' ? 'radial' : lyricVisualizerDefaults.style)
+const sanitizeOpacity = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return lyricVisualizerDefaults.opacity
+    return clampNumber(Math.round(n), 0, 100, lyricVisualizerDefaults.opacity)
+}
+const sanitizeTransitionDelay = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return lyricVisualizerDefaults.transitionDelay
+    return Math.round(clampNumber(n, 0, 0.95, lyricVisualizerDefaults.transitionDelay) * 100) / 100
+}
+const sanitizeRadialSize = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return lyricVisualizerDefaults.radialSize
+    return clampNumber(Math.round(n), 10, 400, lyricVisualizerDefaults.radialSize)
+}
+const sanitizeRadialOffset = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return 0
+    return clampNumber(Math.round(n), -100, 100, 0)
+}
+const sanitizeRadialCoreSize = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return lyricVisualizerDefaults.radialCoreSize
+    return clampNumber(Math.round(n), 10, 95, lyricVisualizerDefaults.radialCoreSize)
+}
+const sanitizeBackgroundBlur = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return customBackgroundDefaults.blur
+    return Math.max(0, Math.round(n))
+}
+const sanitizeBackgroundBrightness = value => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return customBackgroundDefaults.brightness
+    return Math.max(0, Math.round(n))
+}
+
+const lyricVisualizerHeightValues = ref([160, 180, 200, 220, 260, 320])
+const lyricVisualizerBarCountValues = ref([24, 32, 48, 64, 96])
+const lyricVisualizerBarWidthValues = ref([35, 45, 55, 65, 75])
+const lyricVisualizerFrequencyMinValues = ref([20, 40, 80, 120, 200])
+const lyricVisualizerFrequencyMaxValues = ref([4000, 6000, 8000, 12000, 16000])
+const lyricVisualizerTransitionDelayValues = ref([0, 0.25, 0.5, 0.75, 0.9])
+const lyricVisualizerOpacityValues = ref([20, 40, 60, 80, 100])
+const lyricVisualizerRadialSizeValues = ref([60, 80, 100, 120, 160])
+const lyricVisualizerRadialOffsetXValues = ref([-50, -25, 0, 25, 50])
+const lyricVisualizerRadialOffsetYValues = ref([-50, -25, 0, 25, 50])
+const lyricVisualizerRadialCoreSizeValues = ref([40, 52, 62, 72, 84])
+const customBackgroundBlurValues = ref([0, 5, 10, 15, 20])
+const customBackgroundBrightnessValues = ref([50, 75, 100, 125, 150])
+
+const lyricVisualizerStyleOptions = [
+    { label: '柱状条形（默认）', value: 'bars' },
+    { label: '辐射圆环', value: 'radial' },
+]
+const customBackgroundModeOptions = [
+    { label: '拉伸填充', value: 'stretch' },
+    { label: '等比裁剪填充（默认）', value: 'cover' },
+    { label: '等比适应', value: 'contain' },
+    { label: '原始尺寸居中', value: 'center' },
+]
+const lyricVisualizerColorOptions = [
+    { label: '黑色（默认）', value: 'black' },
+    { label: '白色', value: 'white' },
+]
+
+const lyricVisualizerHeightOptions = computed(() => lyricVisualizerHeightValues.value.map(value => ({ label: formatOptionLabel(value, 'px', lyricVisualizerDefaults.height), value })))
+const lyricVisualizerBarCountOptions = computed(() => lyricVisualizerBarCountValues.value.map(value => ({ label: formatOptionLabel(value, ' 个', lyricVisualizerDefaults.barCount), value })))
+const lyricVisualizerBarWidthOptions = computed(() => lyricVisualizerBarWidthValues.value.map(value => ({ label: formatOptionLabel(value, '', lyricVisualizerDefaults.barWidth), value })))
+const lyricVisualizerFrequencyMinOptions = computed(() => lyricVisualizerFrequencyMinValues.value.map(value => ({ label: formatOptionLabel(value, 'Hz', lyricVisualizerDefaults.frequencyMin), value })))
+const lyricVisualizerFrequencyMaxOptions = computed(() => lyricVisualizerFrequencyMaxValues.value.map(value => ({ label: formatOptionLabel(value, 'Hz', lyricVisualizerDefaults.frequencyMax), value })))
+const lyricVisualizerTransitionDelayOptions = computed(() => lyricVisualizerTransitionDelayValues.value.map(value => ({ label: formatOptionLabel(value, ' 秒', lyricVisualizerDefaults.transitionDelay, 2), value })))
+const lyricVisualizerOpacityOptions = computed(() => lyricVisualizerOpacityValues.value.map(value => ({ label: formatOptionLabel(value, '%', lyricVisualizerDefaults.opacity), value })))
+const lyricVisualizerRadialSizeOptions = computed(() => lyricVisualizerRadialSizeValues.value.map(value => ({ label: formatOptionLabel(value, '%', lyricVisualizerDefaults.radialSize), value })))
+const lyricVisualizerRadialOffsetXOptions = computed(() => lyricVisualizerRadialOffsetXValues.value.map(value => ({ label: formatOptionLabel(value, '%', lyricVisualizerDefaults.radialOffsetX), value })))
+const lyricVisualizerRadialOffsetYOptions = computed(() => lyricVisualizerRadialOffsetYValues.value.map(value => ({ label: formatOptionLabel(value, '%', lyricVisualizerDefaults.radialOffsetY), value })))
+const lyricVisualizerRadialCoreSizeOptions = computed(() => lyricVisualizerRadialCoreSizeValues.value.map(value => ({ label: formatOptionLabel(value, '%', lyricVisualizerDefaults.radialCoreSize), value })))
+const customBackgroundBlurOptions = computed(() => customBackgroundBlurValues.value.map(value => ({ label: formatOptionLabel(value, 'px', customBackgroundDefaults.blur), value })))
+const customBackgroundBrightnessOptions = computed(() => customBackgroundBrightnessValues.value.map(value => ({ label: formatOptionLabel(value, '%', customBackgroundDefaults.brightness), value })))
+
+const lyricVisualizerHeightCustom = ref('')
+const lyricVisualizerBarCountCustom = ref('')
+const lyricVisualizerBarWidthCustom = ref('')
+const lyricVisualizerFrequencyMinCustom = ref('')
+const lyricVisualizerFrequencyMaxCustom = ref('')
+const lyricVisualizerTransitionDelayCustom = ref('')
+const lyricVisualizerOpacityCustom = ref('')
+const lyricVisualizerRadialSizeCustom = ref('')
+const lyricVisualizerRadialOffsetXCustom = ref('')
+const lyricVisualizerRadialOffsetYCustom = ref('')
+const lyricVisualizerRadialCoreSizeCustom = ref('')
+const customBackgroundBlurCustom = ref('')
+const customBackgroundBrightnessCustom = ref('')
+
+const lyricVisualizerHeightAction = createCustomActionState(lyricVisualizerHeightCustom, sanitizeHeight, lyricVisualizerHeightValues)
+const lyricVisualizerBarCountAction = createCustomActionState(lyricVisualizerBarCountCustom, sanitizeBarCount, lyricVisualizerBarCountValues)
+const lyricVisualizerBarWidthAction = createCustomActionState(lyricVisualizerBarWidthCustom, sanitizeBarWidth, lyricVisualizerBarWidthValues)
+const lyricVisualizerTransitionDelayAction = createCustomActionState(lyricVisualizerTransitionDelayCustom, sanitizeTransitionDelay, lyricVisualizerTransitionDelayValues)
+const lyricVisualizerOpacityAction = createCustomActionState(lyricVisualizerOpacityCustom, sanitizeOpacity, lyricVisualizerOpacityValues)
+const lyricVisualizerRadialSizeAction = createCustomActionState(lyricVisualizerRadialSizeCustom, sanitizeRadialSize, lyricVisualizerRadialSizeValues)
+const lyricVisualizerRadialOffsetXAction = createCustomActionState(lyricVisualizerRadialOffsetXCustom, sanitizeRadialOffset, lyricVisualizerRadialOffsetXValues)
+const lyricVisualizerRadialOffsetYAction = createCustomActionState(lyricVisualizerRadialOffsetYCustom, sanitizeRadialOffset, lyricVisualizerRadialOffsetYValues)
+const lyricVisualizerRadialCoreSizeAction = createCustomActionState(lyricVisualizerRadialCoreSizeCustom, sanitizeRadialCoreSize, lyricVisualizerRadialCoreSizeValues)
+const customBackgroundBlurAction = createCustomActionState(customBackgroundBlurCustom, sanitizeBackgroundBlur, customBackgroundBlurValues)
+const customBackgroundBrightnessAction = createCustomActionState(customBackgroundBrightnessCustom, sanitizeBackgroundBrightness, customBackgroundBrightnessValues)
+
+const lyricVisualizerFrequencyMinAction = computed(() => {
+    const raw = String(lyricVisualizerFrequencyMinCustom.value ?? '').trim()
+    if (!raw) return { mode: 'add', value: null, exists: false, pairedMax: null }
+    const { min, max } = sanitizeFrequencyRange(raw, playerStore.lyricVisualizerFrequencyMax)
+    if (!Number.isFinite(min)) return { mode: 'add', value: null, exists: false, pairedMax: null }
+    const exists = lyricVisualizerFrequencyMinValues.value.includes(min)
+    return { mode: exists ? 'remove' : 'add', value: min, exists, pairedMax: max }
+})
+
+const lyricVisualizerFrequencyMaxAction = computed(() => {
+    const raw = String(lyricVisualizerFrequencyMaxCustom.value ?? '').trim()
+    if (!raw) return { mode: 'add', value: null, exists: false, pairedMin: null }
+    const { min, max } = sanitizeFrequencyRange(playerStore.lyricVisualizerFrequencyMin, raw)
+    if (!Number.isFinite(max)) return { mode: 'add', value: null, exists: false, pairedMin: null }
+    const exists = lyricVisualizerFrequencyMaxValues.value.includes(max)
+    return { mode: exists ? 'remove' : 'add', value: max, exists, pairedMin: min }
+})
+
+const makeAddOption = (action, valuesRef, customRef, storeKey, defaultValue) => () => {
+    const { mode, value } = action.value
+    if (value === null) return
+    if (mode === 'remove') {
+        removeChoiceValue(valuesRef, value)
+        if (playerStore[storeKey] === value) playerStore[storeKey] = defaultValue
+    } else {
+        addChoiceValue(valuesRef, value)
+        playerStore[storeKey] = value
+    }
+    customRef.value = ''
+}
+
+const addLyricVisualizerHeightOption = makeAddOption(lyricVisualizerHeightAction, lyricVisualizerHeightValues, lyricVisualizerHeightCustom, 'lyricVisualizerHeight', lyricVisualizerDefaults.height)
+const addLyricVisualizerBarCountOption = makeAddOption(lyricVisualizerBarCountAction, lyricVisualizerBarCountValues, lyricVisualizerBarCountCustom, 'lyricVisualizerBarCount', lyricVisualizerDefaults.barCount)
+const addLyricVisualizerBarWidthOption = makeAddOption(lyricVisualizerBarWidthAction, lyricVisualizerBarWidthValues, lyricVisualizerBarWidthCustom, 'lyricVisualizerBarWidth', lyricVisualizerDefaults.barWidth)
+const addLyricVisualizerTransitionDelayOption = makeAddOption(lyricVisualizerTransitionDelayAction, lyricVisualizerTransitionDelayValues, lyricVisualizerTransitionDelayCustom, 'lyricVisualizerTransitionDelay', lyricVisualizerDefaults.transitionDelay)
+const addLyricVisualizerOpacityOption = makeAddOption(lyricVisualizerOpacityAction, lyricVisualizerOpacityValues, lyricVisualizerOpacityCustom, 'lyricVisualizerOpacity', lyricVisualizerDefaults.opacity)
+const addLyricVisualizerRadialSizeOption = makeAddOption(lyricVisualizerRadialSizeAction, lyricVisualizerRadialSizeValues, lyricVisualizerRadialSizeCustom, 'lyricVisualizerRadialSize', lyricVisualizerDefaults.radialSize)
+const addLyricVisualizerRadialOffsetXOption = makeAddOption(lyricVisualizerRadialOffsetXAction, lyricVisualizerRadialOffsetXValues, lyricVisualizerRadialOffsetXCustom, 'lyricVisualizerRadialOffsetX', lyricVisualizerDefaults.radialOffsetX)
+const addLyricVisualizerRadialOffsetYOption = makeAddOption(lyricVisualizerRadialOffsetYAction, lyricVisualizerRadialOffsetYValues, lyricVisualizerRadialOffsetYCustom, 'lyricVisualizerRadialOffsetY', lyricVisualizerDefaults.radialOffsetY)
+const addLyricVisualizerRadialCoreSizeOption = makeAddOption(lyricVisualizerRadialCoreSizeAction, lyricVisualizerRadialCoreSizeValues, lyricVisualizerRadialCoreSizeCustom, 'lyricVisualizerRadialCoreSize', lyricVisualizerDefaults.radialCoreSize)
+const addCustomBackgroundBlurOption = makeAddOption(customBackgroundBlurAction, customBackgroundBlurValues, customBackgroundBlurCustom, 'customBackgroundBlur', customBackgroundDefaults.blur)
+const addCustomBackgroundBrightnessOption = makeAddOption(customBackgroundBrightnessAction, customBackgroundBrightnessValues, customBackgroundBrightnessCustom, 'customBackgroundBrightness', customBackgroundDefaults.brightness)
+
+const addLyricVisualizerFrequencyMinOption = () => {
+    const { mode, value, pairedMax } = lyricVisualizerFrequencyMinAction.value
+    if (value === null) return
+    if (mode === 'remove') {
+        removeChoiceValue(lyricVisualizerFrequencyMinValues, value)
+        if (playerStore.lyricVisualizerFrequencyMin === value) {
+            playerStore.lyricVisualizerFrequencyMin = lyricVisualizerDefaults.frequencyMin
+            playerStore.lyricVisualizerFrequencyMax = lyricVisualizerDefaults.frequencyMax
+        }
+    } else {
+        addChoiceValue(lyricVisualizerFrequencyMinValues, value)
+        if (Number.isFinite(pairedMax)) {
+            addChoiceValue(lyricVisualizerFrequencyMaxValues, pairedMax)
+            playerStore.lyricVisualizerFrequencyMax = pairedMax
+        }
+        playerStore.lyricVisualizerFrequencyMin = value
+    }
+    lyricVisualizerFrequencyMinCustom.value = ''
+}
+const addLyricVisualizerFrequencyMaxOption = () => {
+    const { mode, value, pairedMin } = lyricVisualizerFrequencyMaxAction.value
+    if (value === null) return
+    if (mode === 'remove') {
+        removeChoiceValue(lyricVisualizerFrequencyMaxValues, value)
+        if (playerStore.lyricVisualizerFrequencyMax === value) {
+            playerStore.lyricVisualizerFrequencyMin = lyricVisualizerDefaults.frequencyMin
+            playerStore.lyricVisualizerFrequencyMax = lyricVisualizerDefaults.frequencyMax
+        }
+    } else {
+        addChoiceValue(lyricVisualizerFrequencyMaxValues, value)
+        if (Number.isFinite(pairedMin)) {
+            addChoiceValue(lyricVisualizerFrequencyMinValues, pairedMin)
+            playerStore.lyricVisualizerFrequencyMin = pairedMin
+        }
+        playerStore.lyricVisualizerFrequencyMax = value
+    }
+    lyricVisualizerFrequencyMaxCustom.value = ''
+}
+
+const resetLyricVisualizerStyle = () => { playerStore.lyricVisualizerStyle = lyricVisualizerDefaults.style }
+const resetLyricVisualizerHeight = () => { playerStore.lyricVisualizerHeight = lyricVisualizerDefaults.height }
+const resetLyricVisualizerBarCount = () => { playerStore.lyricVisualizerBarCount = lyricVisualizerDefaults.barCount }
+const resetLyricVisualizerBarWidth = () => { playerStore.lyricVisualizerBarWidth = lyricVisualizerDefaults.barWidth }
+const resetLyricVisualizerFrequencyMin = () => { playerStore.lyricVisualizerFrequencyMin = lyricVisualizerDefaults.frequencyMin }
+const resetLyricVisualizerFrequencyMax = () => { playerStore.lyricVisualizerFrequencyMax = lyricVisualizerDefaults.frequencyMax }
+const resetLyricVisualizerTransitionDelay = () => { playerStore.lyricVisualizerTransitionDelay = lyricVisualizerDefaults.transitionDelay }
+const resetLyricVisualizerOpacity = () => { playerStore.lyricVisualizerOpacity = lyricVisualizerDefaults.opacity }
+const resetLyricVisualizerRadialSize = () => { playerStore.lyricVisualizerRadialSize = lyricVisualizerDefaults.radialSize }
+const resetLyricVisualizerRadialOffsetX = () => { playerStore.lyricVisualizerRadialOffsetX = lyricVisualizerDefaults.radialOffsetX }
+const resetLyricVisualizerRadialOffsetY = () => { playerStore.lyricVisualizerRadialOffsetY = lyricVisualizerDefaults.radialOffsetY }
+const resetLyricVisualizerRadialCoreSize = () => { playerStore.lyricVisualizerRadialCoreSize = lyricVisualizerDefaults.radialCoreSize }
+const resetCustomBackgroundBlur = () => { playerStore.customBackgroundBlur = customBackgroundDefaults.blur }
+const resetCustomBackgroundBrightness = () => { playerStore.customBackgroundBrightness = customBackgroundDefaults.brightness }
+
+watch(() => playerStore.lyricVisualizerHeight, value => { const safe = sanitizeHeight(value); if (value !== safe) playerStore.lyricVisualizerHeight = safe; addChoiceValue(lyricVisualizerHeightValues, safe) }, { immediate: true })
+watch([() => playerStore.lyricVisualizerFrequencyMin, () => playerStore.lyricVisualizerFrequencyMax], ([min, max]) => {
+    const { min: safeMin, max: safeMax } = sanitizeFrequencyRange(min, max)
+    if (min !== safeMin) playerStore.lyricVisualizerFrequencyMin = safeMin
+    if (max !== safeMax) playerStore.lyricVisualizerFrequencyMax = safeMax
+    addChoiceValue(lyricVisualizerFrequencyMinValues, safeMin)
+    addChoiceValue(lyricVisualizerFrequencyMaxValues, safeMax)
+}, { immediate: true })
+watch(() => playerStore.lyricVisualizerBarCount, value => { const safe = sanitizeBarCount(value); if (value !== safe) playerStore.lyricVisualizerBarCount = safe; addChoiceValue(lyricVisualizerBarCountValues, safe) }, { immediate: true })
+watch(() => playerStore.lyricVisualizerBarWidth, value => { const safe = sanitizeBarWidth(value); if (value !== safe) playerStore.lyricVisualizerBarWidth = safe; addChoiceValue(lyricVisualizerBarWidthValues, safe) }, { immediate: true })
+watch(() => playerStore.lyricVisualizerStyle, value => { const safe = sanitizeVisualizerStyle(value); if (value !== safe) playerStore.lyricVisualizerStyle = safe }, { immediate: true })
+watch(() => playerStore.lyricVisualizerTransitionDelay, value => { const safe = sanitizeTransitionDelay(value); if (value !== safe) playerStore.lyricVisualizerTransitionDelay = safe; addChoiceValue(lyricVisualizerTransitionDelayValues, safe) }, { immediate: true })
+watch(() => playerStore.lyricVisualizerOpacity, value => { const safe = sanitizeOpacity(value); if (value !== safe) playerStore.lyricVisualizerOpacity = safe; addChoiceValue(lyricVisualizerOpacityValues, safe) }, { immediate: true })
+watch(() => playerStore.lyricVisualizerRadialSize, value => { const safe = sanitizeRadialSize(value); if (value !== safe) playerStore.lyricVisualizerRadialSize = safe; addChoiceValue(lyricVisualizerRadialSizeValues, safe) }, { immediate: true })
+watch(() => playerStore.lyricVisualizerRadialOffsetX, value => { const safe = sanitizeRadialOffset(value); if (value !== safe) playerStore.lyricVisualizerRadialOffsetX = safe; addChoiceValue(lyricVisualizerRadialOffsetXValues, safe) }, { immediate: true })
+watch(() => playerStore.lyricVisualizerRadialOffsetY, value => { const safe = sanitizeRadialOffset(value); if (value !== safe) playerStore.lyricVisualizerRadialOffsetY = safe; addChoiceValue(lyricVisualizerRadialOffsetYValues, safe) }, { immediate: true })
+watch(() => playerStore.lyricVisualizerRadialCoreSize, value => { const safe = sanitizeRadialCoreSize(value); if (value !== safe) playerStore.lyricVisualizerRadialCoreSize = safe; addChoiceValue(lyricVisualizerRadialCoreSizeValues, safe) }, { immediate: true })
+watch(() => playerStore.lyricVisualizerColor, value => { if (value !== 'black' && value !== 'white') playerStore.lyricVisualizerColor = lyricVisualizerDefaults.color }, { immediate: true })
+watch(() => playerStore.customBackgroundBlur, value => { const safe = sanitizeBackgroundBlur(value); if (value !== safe) playerStore.customBackgroundBlur = safe; addChoiceValue(customBackgroundBlurValues, safe) }, { immediate: true })
+watch(() => playerStore.customBackgroundBrightness, value => { const safe = sanitizeBackgroundBrightness(value); if (value !== safe) playerStore.customBackgroundBrightness = safe; addChoiceValue(customBackgroundBrightnessValues, safe) }, { immediate: true })
+watch(() => playerStore.customBackgroundMode, value => { if (!customBackgroundModeOptions.some(o => o.value === value)) playerStore.customBackgroundMode = customBackgroundDefaults.mode }, { immediate: true })
+watch(() => playerStore.customBackgroundApplyToPlayer, value => { if (typeof value !== 'boolean') playerStore.customBackgroundApplyToPlayer = customBackgroundDefaults.applyToPlayer }, { immediate: true })
+watch(() => playerStore.customBackgroundApplyToChrome, value => { if (typeof value !== 'boolean') playerStore.customBackgroundApplyToChrome = customBackgroundDefaults.applyToChrome }, { immediate: true })
+
+const setLyricVisualizer = () => {
+    if (!playerStore.lyricVisualizer) dialogOpen('确定开启', '开启后此功能会消耗一定性能且可能造成卡顿，确定开启吗？', flag => { if (flag) playerStore.lyricVisualizer = !playerStore.lyricVisualizer })
+    else playerStore.lyricVisualizer = false
+}
+const toggleCustomBackground = () => { playerStore.customBackgroundEnabled = !playerStore.customBackgroundEnabled }
+const toggleCustomBackgroundApplyToPlayer = () => { playerStore.customBackgroundApplyToPlayer = !playerStore.customBackgroundApplyToPlayer }
+const toggleCustomBackgroundApplyToChrome = () => { playerStore.customBackgroundApplyToChrome = !playerStore.customBackgroundApplyToChrome }
+const chooseCustomBackgroundImage = () => {
+    const api = (window.electronAPI && window.electronAPI.openImageFile) ? window.electronAPI.openImageFile : (windowApi && windowApi.openImageFile)
+    if (!api) return
+    api().then(path => { if (path) playerStore.customBackgroundImage = path })
+}
+const clearCustomBackgroundImage = () => { playerStore.customBackgroundImage = '' }
+
 
 onBeforeRouteLeave((to, from, next) => {
     const snapshot = setAppSettings()
@@ -541,6 +916,289 @@ const clearFmRecent = () => {
                                         <div class="toggle-on" v-show="playerStore.showSongTranslation"></div>
                                     </Transition>
                                 </div>
+                            </div>
+                        </div>
+                        <!-- 自定义背景 -->
+                        <div class="option">
+                            <div class="option-name">开启自定义背景</div>
+                            <div class="option-operation">
+                                <div class="toggle" @click="toggleCustomBackground()">
+                                    <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.customBackgroundEnabled }">
+                                        {{ playerStore.customBackgroundEnabled ? '已开启' : '已关闭' }}
+                                    </div>
+                                    <Transition name="toggle">
+                                        <div class="toggle-on" v-show="playerStore.customBackgroundEnabled"></div>
+                                    </Transition>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.customBackgroundEnabled">
+                            <div class="option-name">背景图片</div>
+                            <div class="option-operation option-operation--file">
+                                <div class="option-file-path" :title="playerStore.customBackgroundImage">
+                                    {{ playerStore.customBackgroundImage ? playerStore.customBackgroundImage : '未选择' }}
+                                </div>
+                                <div class="option-add" @click="chooseCustomBackgroundImage">选择</div>
+                                <div class="option-reset" v-if="playerStore.customBackgroundImage" @click="clearCustomBackgroundImage">清除</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.customBackgroundEnabled">
+                            <div class="option-name">背景显示模式</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.customBackgroundMode" :options="customBackgroundModeOptions" />
+                                </div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.customBackgroundEnabled">
+                            <div class="option-name">背景模糊</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.customBackgroundBlur" :options="customBackgroundBlurOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" min="0" v-model="customBackgroundBlurCustom" @keyup.enter="addCustomBackgroundBlurOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': customBackgroundBlurAction.mode === 'remove' }" @click="addCustomBackgroundBlurOption">
+                                        {{ customBackgroundBlurAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetCustomBackgroundBlur">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.customBackgroundEnabled">
+                            <div class="option-name">背景亮度</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.customBackgroundBrightness" :options="customBackgroundBrightnessOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" min="0" v-model="customBackgroundBrightnessCustom" @keyup.enter="addCustomBackgroundBrightnessOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': customBackgroundBrightnessAction.mode === 'remove' }" @click="addCustomBackgroundBrightnessOption">
+                                        {{ customBackgroundBrightnessAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetCustomBackgroundBrightness">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.customBackgroundEnabled">
+                            <div class="option-name">播放页背景</div>
+                            <div class="option-operation">
+                                <div class="toggle" @click="toggleCustomBackgroundApplyToPlayer()">
+                                    <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.customBackgroundApplyToPlayer }">
+                                        {{ playerStore.customBackgroundApplyToPlayer ? '已开启' : '已关闭' }}
+                                    </div>
+                                    <Transition name="toggle">
+                                        <div class="toggle-on" v-show="playerStore.customBackgroundApplyToPlayer"></div>
+                                    </Transition>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.customBackgroundEnabled">
+                            <div class="option-name">主界面背景</div>
+                            <div class="option-operation">
+                                <div class="toggle" @click="toggleCustomBackgroundApplyToChrome()">
+                                    <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.customBackgroundApplyToChrome }">
+                                        {{ playerStore.customBackgroundApplyToChrome ? '已开启' : '已关闭' }}
+                                    </div>
+                                    <Transition name="toggle">
+                                        <div class="toggle-on" v-show="playerStore.customBackgroundApplyToChrome"></div>
+                                    </Transition>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 歌词音频可视化 -->
+                        <div class="option">
+                            <div class="option-name">开启歌词音频可视化</div>
+                            <div class="option-operation">
+                                <div class="toggle" @click="setLyricVisualizer()">
+                                    <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.lyricVisualizer }">{{ playerStore.lyricVisualizer ? '已开启' : '已关闭' }}</div>
+                                    <Transition name="toggle">
+                                        <div class="toggle-on" v-show="playerStore.lyricVisualizer"></div>
+                                    </Transition>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer">
+                            <div class="option-name">可视化样式</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerStyle" :options="lyricVisualizerStyleOptions" />
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerStyle">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer && playerStore.lyricVisualizerStyle === 'radial'">
+                            <div class="option-name">圆环大小</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerRadialSize" :options="lyricVisualizerRadialSizeOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" min="10" v-model="lyricVisualizerRadialSizeCustom" @keyup.enter="addLyricVisualizerRadialSizeOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerRadialSizeAction.mode === 'remove' }" @click="addLyricVisualizerRadialSizeOption">
+                                        {{ lyricVisualizerRadialSizeAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerRadialSize">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer && playerStore.lyricVisualizerStyle === 'radial'">
+                            <div class="option-name">中心圆尺寸</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerRadialCoreSize" :options="lyricVisualizerRadialCoreSizeOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" min="10" max="95" v-model="lyricVisualizerRadialCoreSizeCustom" @keyup.enter="addLyricVisualizerRadialCoreSizeOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerRadialCoreSizeAction.mode === 'remove' }" @click="addLyricVisualizerRadialCoreSizeOption">
+                                        {{ lyricVisualizerRadialCoreSizeAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerRadialCoreSize">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer && playerStore.lyricVisualizerStyle === 'radial'">
+                            <div class="option-name">X轴偏移</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerRadialOffsetX" :options="lyricVisualizerRadialOffsetXOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" v-model="lyricVisualizerRadialOffsetXCustom" @keyup.enter="addLyricVisualizerRadialOffsetXOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerRadialOffsetXAction.mode === 'remove' }" @click="addLyricVisualizerRadialOffsetXOption">
+                                        {{ lyricVisualizerRadialOffsetXAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerRadialOffsetX">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer && playerStore.lyricVisualizerStyle === 'radial'">
+                            <div class="option-name">Y轴偏移</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerRadialOffsetY" :options="lyricVisualizerRadialOffsetYOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" v-model="lyricVisualizerRadialOffsetYCustom" @keyup.enter="addLyricVisualizerRadialOffsetYOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerRadialOffsetYAction.mode === 'remove' }" @click="addLyricVisualizerRadialOffsetYOption">
+                                        {{ lyricVisualizerRadialOffsetYAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerRadialOffsetY">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer">
+                            <div class="option-name">可视化高度</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerHeight" :options="lyricVisualizerHeightOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" min="1" v-model="lyricVisualizerHeightCustom" @keyup.enter="addLyricVisualizerHeightOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerHeightAction.mode === 'remove' }" @click="addLyricVisualizerHeightOption">
+                                        {{ lyricVisualizerHeightAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerHeight">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer">
+                            <div class="option-name">柱体数量</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerBarCount" :options="lyricVisualizerBarCountOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" min="1" v-model="lyricVisualizerBarCountCustom" @keyup.enter="addLyricVisualizerBarCountOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerBarCountAction.mode === 'remove' }" @click="addLyricVisualizerBarCountOption">
+                                        {{ lyricVisualizerBarCountAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerBarCount">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer">
+                            <div class="option-name">柱体宽度</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerBarWidth" :options="lyricVisualizerBarWidthOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" min="1" v-model="lyricVisualizerBarWidthCustom" @keyup.enter="addLyricVisualizerBarWidthOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerBarWidthAction.mode === 'remove' }" @click="addLyricVisualizerBarWidthOption">
+                                        {{ lyricVisualizerBarWidthAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerBarWidth">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer">
+                            <div class="option-name">频率范围</div>
+                            <div class="option-operation option-operation--range">
+                                <div class="option-group">
+                                    <span class="option-group-label">最低</span>
+                                    <div class="selector-wrapper">
+                                        <Selector v-model="playerStore.lyricVisualizerFrequencyMin" :options="lyricVisualizerFrequencyMinOptions" />
+                                    </div>
+                                    <div class="option-add-group">
+                                        <input type="number" min="20" v-model="lyricVisualizerFrequencyMinCustom" @keyup.enter="addLyricVisualizerFrequencyMinOption" />
+                                        <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerFrequencyMinAction.mode === 'remove' }" @click="addLyricVisualizerFrequencyMinOption">
+                                            {{ lyricVisualizerFrequencyMinAction.mode === 'remove' ? '删除' : '添加' }}
+                                        </div>
+                                    </div>
+                                    <div class="option-reset" @click="resetLyricVisualizerFrequencyMin">重置</div>
+                                </div>
+                                <div class="option-group">
+                                    <span class="option-group-label">最高</span>
+                                    <div class="selector-wrapper">
+                                        <Selector v-model="playerStore.lyricVisualizerFrequencyMax" :options="lyricVisualizerFrequencyMaxOptions" />
+                                    </div>
+                                    <div class="option-add-group">
+                                        <input type="number" min="20" v-model="lyricVisualizerFrequencyMaxCustom" @keyup.enter="addLyricVisualizerFrequencyMaxOption" />
+                                        <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerFrequencyMaxAction.mode === 'remove' }" @click="addLyricVisualizerFrequencyMaxOption">
+                                            {{ lyricVisualizerFrequencyMaxAction.mode === 'remove' ? '删除' : '添加' }}
+                                        </div>
+                                    </div>
+                                    <div class="option-reset" @click="resetLyricVisualizerFrequencyMax">重置</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer">
+                            <div class="option-name">可视化透明度</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerOpacity" :options="lyricVisualizerOpacityOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" min="0" max="100" v-model="lyricVisualizerOpacityCustom" @keyup.enter="addLyricVisualizerOpacityOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerOpacityAction.mode === 'remove' }" @click="addLyricVisualizerOpacityOption">
+                                        {{ lyricVisualizerOpacityAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerOpacity">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer">
+                            <div class="option-name">可视化颜色</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerColor" :options="lyricVisualizerColorOptions" />
+                                </div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer">
+                            <div class="option-name">过渡延迟</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerTransitionDelay" :options="lyricVisualizerTransitionDelayOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" step="0.01" min="0" max="0.95" v-model="lyricVisualizerTransitionDelayCustom" @keyup.enter="addLyricVisualizerTransitionDelayOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerTransitionDelayAction.mode === 'remove' }" @click="addLyricVisualizerTransitionDelayOption">
+                                        {{ lyricVisualizerTransitionDelayAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerTransitionDelay">重置</div>
                             </div>
                         </div>
                         <div class="option">
@@ -984,6 +1642,116 @@ const clearFmRecent = () => {
                                 background-color: transparent;
                             }
                         }
+                        .option-operation {
+                            display: flex;
+                            flex-direction: row;
+                            align-items: center;
+                            gap: 12px;
+                            flex-wrap: wrap;
+                            > input {
+                                width: 200px;
+                                height: 34px;
+                                padding: 5px 10px;
+                                font: 13px SourceHanSansCN-Bold;
+                                color: black;
+                                background-color: rgba(255, 255, 255, 0.35);
+                                border: none;
+                                outline: none;
+                                transition: 0.2s;
+                                box-sizing: border-box;
+                            }
+                            > input:focus {
+                                box-shadow: 0 0 0 1px black;
+                            }
+                        }
+                        .option-operation--selector {
+                            row-gap: 12px;
+                        }
+                        .option-operation--range {
+                            flex-direction: column;
+                            align-items: stretch;
+                            gap: 12px;
+                            .option-group {
+                                display: flex;
+                                flex-wrap: wrap;
+                                align-items: center;
+                                gap: 12px;
+                                width: 100%;
+                                .selector-wrapper { width: 200px; }
+                                .option-add-group { margin-left: auto; }
+                                .option-reset { margin-left: auto; }
+                            }
+                        }
+                        .option-operation--file {
+                            gap: 12px;
+                            flex-wrap: wrap;
+                            .option-file-path {
+                                width: 320px;
+                                max-width: 100%;
+                                height: 34px;
+                                padding: 5px 10px;
+                                background-color: rgba(255, 255, 255, 0.35);
+                                font: 13px SourceHanSansCN-Bold;
+                                color: black;
+                                display: flex;
+                                align-items: center;
+                                overflow: hidden;
+                                text-overflow: ellipsis;
+                                white-space: nowrap;
+                                box-sizing: border-box;
+                            }
+                        }
+                        .selector-wrapper {
+                            width: 200px;
+                            .selector { width: 100%; }
+                        }
+                        .option-add-group {
+                            display: flex;
+                            flex-direction: row;
+                            align-items: center;
+                            gap: 8px;
+                            flex-shrink: 0;
+                            width: 200px;
+                            input {
+                                flex: 1;
+                                min-width: 0;
+                                height: 34px;
+                                padding: 5px 10px;
+                                font: 13px SourceHanSansCN-Bold;
+                                color: black;
+                                background-color: rgba(255, 255, 255, 0.35);
+                                border: none;
+                                outline: none;
+                                transition: 0.2s;
+                                box-sizing: border-box;
+                            }
+                            input:focus { box-shadow: 0 0 0 1px black; }
+                        }
+                        .option-group-label { font: 13px SourceHanSansCN-Bold; }
+                        .option-reset,
+                        .option-add {
+                            padding: 5px 12px;
+                            font: 13px SourceHanSansCN-Bold;
+                            color: black;
+                            background-color: rgba(255, 255, 255, 0.35);
+                            transition: 0.2s;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            height: 34px;
+                            box-sizing: border-box;
+                            flex-shrink: 0;
+                            &:hover {
+                                cursor: pointer;
+                                opacity: 0.8;
+                                box-shadow: 0 0 0 1px black;
+                            }
+                        }
+                        .option-add--remove {
+                            color: white;
+                            background-color: rgba(220, 53, 69, 0.8);
+                        }
+                        .option-add--remove:hover { box-shadow: 0 0 0 1px white; }
                         .button {
                             margin-right: 1px;
                             padding: 5px 10px;

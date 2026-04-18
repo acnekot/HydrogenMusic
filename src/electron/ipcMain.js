@@ -794,6 +794,14 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
             return null
         }
     })
+    ipcMain.handle('dialog:openImageFile', async () => {
+        const { canceled, filePaths } = await dialog.showOpenDialog({
+            properties: ['openFile'],
+            filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'] }],
+        })
+        if (canceled) return null
+        return filePaths && filePaths.length ? filePaths[0] : null
+    })
     ipcMain.on('register-shortcuts', () => {
         registerShortcuts(win, app)
     })

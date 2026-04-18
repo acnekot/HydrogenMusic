@@ -214,10 +214,60 @@ watch(currentTrack, (song) => {
         }
     } catch (_) {}
 });
+
+// 自定义背景（应用于播放页）
+const customBgActive = computed(
+    () =>
+        playerStore.customBackgroundEnabled &&
+        playerStore.customBackgroundApplyToPlayer &&
+        !!playerStore.customBackgroundImage
+);
+
+const customBgStyle = computed(() => {
+    if (!customBgActive.value) return {};
+    const rawPath = playerStore.customBackgroundImage;
+    if (!rawPath) return {};
+
+    let normalizedPath = rawPath.replace(/\\/g, '/');
+    if (!normalizedPath.startsWith('file://')) {
+        if (/^[a-zA-Z]:\//.test(normalizedPath)) {
+            normalizedPath = `/${normalizedPath}`;
+        }
+        normalizedPath = `file://${normalizedPath}`;
+    }
+
+    const escapedUrl = normalizedPath.replace(/"/g, '\\"');
+    const mode = playerStore.customBackgroundMode;
+    let size = 'cover';
+    let repeat = 'no-repeat';
+    let position = 'center center';
+
+    if (mode === 'stretch') {
+        size = '100% 100%';
+    } else if (mode === 'contain') {
+        size = 'contain';
+    } else if (mode === 'center') {
+        size = 'auto';
+    } else {
+        size = 'cover';
+    }
+
+    const blurValue = Math.max(0, Number(playerStore.customBackgroundBlur) || 0);
+    const brightnessValue = Math.max(0, Number(playerStore.customBackgroundBrightness) || 100);
+
+    return {
+        '--custom-background-image': `url("${escapedUrl}")`,
+        '--custom-background-size': size,
+        '--custom-background-repeat': repeat,
+        '--custom-background-position': position,
+        '--custom-background-blur': `${blurValue}px`,
+        '--custom-background-brightness': `${brightnessValue}%`,
+    };
+});
 </script>
 
 <template>
-    <div class="music-player">
+    <div class="music-player" :class="{ 'music-player--custom': customBgActive }" :style="customBgStyle">
         <Transition name="fade3">
             <div
                 v-if="showCoverBackdrop"
@@ -288,6 +338,26 @@ watch(currentTrack, (song) => {
     transition: 0.2s;
     position: relative;
     overflow: hidden;
+
+    &.music-player--custom {
+        background: transparent;
+    }
+    &.music-player--custom::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background-image: var(--custom-background-image);
+        background-size: var(--custom-background-size, cover);
+        background-repeat: var(--custom-background-repeat, no-repeat);
+        background-position: var(--custom-background-position, center center);
+        filter: blur(var(--custom-background-blur, 0px)) brightness(var(--custom-background-brightness, 100%));
+        transform: scale(1.05);
+        z-index: 0;
+    }
+    &.music-player--custom > * {
+        position: relative;
+        z-index: 1;
+    }
 
     .back-drop {
         position: absolute;

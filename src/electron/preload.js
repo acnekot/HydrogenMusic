@@ -249,6 +249,7 @@ contextBridge.exposeInMainWorld('windowApi', {
     setSettings,
     getSettings: () => ipcRenderer.invoke('get-settings'),
     openFile: () => ipcRenderer.invoke('dialog:openFile'),
+    openImageFile: () => ipcRenderer.invoke('dialog:openImageFile'),
     clearLocalMusicData,
     persistLocalMusicDerived: (payload) => ipcRenderer.send('persist-local-music-derived', payload),
     registerShortcuts,
