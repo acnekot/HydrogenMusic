@@ -1,4 +1,3 @@
-use std::io::BufReader;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
@@ -9,7 +8,7 @@ use crate::eq::DeckEqualizer;
 use crate::bpm::{self, BpmResult};
 
 const MAX_CUES: usize = 4;
-const MAX_FX_SLOTS: usize = 4;
+pub const MAX_FX_SLOTS: usize = 4;
 
 /// 一条 FX 插槽
 pub struct FxSlot {
@@ -91,7 +90,7 @@ impl Deck {
         self.stop();
 
         let file = std::fs::File::open(path).map_err(|e| format!("cannot open file: {}", e))?;
-        let mss = MediaSourceStream::new(Box::new(BufReader::new(file)), Default::default());
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
         let mut hint = Hint::new();
         if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {

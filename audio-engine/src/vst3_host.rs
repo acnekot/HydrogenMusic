@@ -87,28 +87,23 @@ impl Vst3Host {
         }
     }
 
-    /// 将插件加载到 Deck 的某个 FX 槽位
-    pub fn load_to_slot(&mut self, deck: &mut Deck, slot: usize, plugin_id: &str) -> Result<(), String> {
-        let plugin_info = self.scanned_plugins
+    /// Find a plugin by id (clones info)
+    pub fn find_plugin(&self, plugin_id: &str) -> Result<PluginInfo, String> {
+        self.scanned_plugins
             .iter()
             .find(|p| p.id == plugin_id)
-            .ok_or_else(|| format!("plugin not found: {}", plugin_id))?;
+            .cloned()
+            .ok_or_else(|| format!("plugin not found: {}", plugin_id))
+    }
 
-        // TODO: 使用 vst3-sys 真正加载 VST3 插件
-        // 当前为占位实现：
-        // 1. 打开 .vst3 bundle
-        // 2. 获取 IPluginFactory
-        // 3. 创建 IComponent + IAudioProcessor
-        // 4. 初始化 process context（sample rate, block size）
-        // 5. 包装成 FxProcessor trait 对象
-        // 6. 赋值到 deck.fx_chain[slot].plugin_instance
-
+    /// 将插件加载到 Deck 的某个 FX 槽位
+    pub fn load_to_deck_slot(&mut self, plugin_info: &PluginInfo, deck: &mut Deck, slot: usize) -> Result<(), String> {
+        // TODO: 使用 vst3 crate 真正加载 VST3 插件
         eprintln!(
             "[VST3] Placeholder: would load '{}' from '{}' into slot {}",
             plugin_info.name, plugin_info.path, slot
         );
 
-        // 标记槽位为活跃
         if slot < 4 {
             deck.fx_chain[slot].active = true;
         }
@@ -117,22 +112,11 @@ impl Vst3Host {
     }
 
     /// 从 FX 槽位卸载插件
-    pub fn unload_from_slot(&self, deck: &mut Deck, slot: usize) {
+    pub fn unload_slot(deck: &mut Deck, slot: usize) {
         if slot < 4 {
             deck.fx_chain[slot].active = false;
             deck.fx_chain[slot].plugin_instance = None;
             deck.fx_chain[slot].params.clear();
         }
-    }
-
-    /// 获取已加载插件的参数列表
-    pub fn get_params(&self, deck: &Deck, slot: usize) -> Result<Vec<PluginParam>, String> {
-        if slot >= 4 {
-            return Err("invalid slot index".to_string());
-        }
-
-        // TODO: 从真正的 VST3 IEditController 获取参数
-        // 当前返回空列表
-        Ok(Vec::new())
     }
 }

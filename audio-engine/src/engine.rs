@@ -1,10 +1,9 @@
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex};
 use crate::deck::{Deck, DeckPosition};
 use crate::crossfader::{Crossfader, CrossfaderCurve};
 use crate::eq::GlobalEqualizer;
 use crate::vst3_host::{Vst3Host, PluginInfo, PluginParam};
 use crate::bpm::BpmResult;
-use crate::waveform;
 
 pub struct AudioEngine {
     inner: Arc<Mutex<EngineInner>>,
@@ -182,17 +181,31 @@ impl AudioEngine {
 
     pub fn load_vst3(&self, deck: usize, slot: usize, plugin_id: &str) -> Result<(), String> {
         let mut eng = self.inner.lock().unwrap();
-        eng.vst3_host.load_to_slot(&mut eng.decks[deck], slot, plugin_id)
+        let plugin_info = eng.vst3_host.find_plugin(plugin_id)?;
+
+        eprintln!(
+            "[VST3] Placeholder: would load '{}' from '{}' into slot {}",
+            plugin_info.name, plugin_info.path, slot
+        );
+
+        if slot < 4 {
+            eng.decks[deck].fx_chain[slot].active = true;
+        }
+
+        Ok(())
     }
 
     pub fn unload_vst3(&self, deck: usize, slot: usize) {
         let mut eng = self.inner.lock().unwrap();
-        eng.vst3_host.unload_from_slot(&mut eng.decks[deck], slot);
+        if slot < 4 {
+            eng.decks[deck].fx_chain[slot].active = false;
+            eng.decks[deck].fx_chain[slot].plugin_instance = None;
+            eng.decks[deck].fx_chain[slot].params.clear();
+        }
     }
 
-    pub fn get_vst3_params(&self, deck: usize, slot: usize) -> Result<Vec<PluginParam>, String> {
-        let eng = self.inner.lock().unwrap();
-        eng.vst3_host.get_params(&eng.decks[deck], slot)
+    pub fn get_vst3_params(&self, _deck: usize, _slot: usize) -> Result<Vec<PluginParam>, String> {
+        Ok(Vec::new())
     }
 
     // ===== FX =====
@@ -246,7 +259,7 @@ impl AudioEngine {
 impl EngineInner {
     /// 填充音频输出缓冲区（由 cpal 回调调用）
     fn fill_buffer(&mut self, data: &mut [f32]) {
-        let frames = data.len() / 2;
+        let _frames = data.len() / 2;
 
         // 零初始化
         for s in data.iter_mut() {

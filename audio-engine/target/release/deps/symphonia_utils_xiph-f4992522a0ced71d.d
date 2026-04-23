@@ -1,0 +1,10 @@
+D:\code\HydrogenMusic-main\audio-engine\target\release\deps\symphonia_utils_xiph-f4992522a0ced71d.d: C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\lib.rs C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\flac\mod.rs C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\flac\metadata.rs C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\vorbis\mod.rs
+
+D:\code\HydrogenMusic-main\audio-engine\target\release\deps\libsymphonia_utils_xiph-f4992522a0ced71d.rlib: C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\lib.rs C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\flac\mod.rs C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\flac\metadata.rs C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\vorbis\mod.rs
+
+D:\code\HydrogenMusic-main\audio-engine\target\release\deps\libsymphonia_utils_xiph-f4992522a0ced71d.rmeta: C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\lib.rs C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\flac\mod.rs C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\flac\metadata.rs C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\vorbis\mod.rs
+
+C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\lib.rs:
+C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\flac\mod.rs:
+C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\flac\metadata.rs:
+C:\Users\acnek\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\symphonia-utils-xiph-0.5.5\src\vorbis\mod.rs:

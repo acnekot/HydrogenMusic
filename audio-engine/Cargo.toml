@@ -19,7 +19,7 @@ symphonia = { version = "0.5", features = ["all"] }
 rubato = "0.15"
 
 # VST3 plugin hosting
-vst3-sys = "0.7"
+vst3 = "0.3"
 
 # IIR filters for EQ
 biquad = "0.4"
