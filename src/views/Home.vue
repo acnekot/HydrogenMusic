@@ -187,6 +187,14 @@ watch(
                         >
                             我的音乐
                         </router-link>
+                        <router-link
+                            ref="djLink"
+                            class="button-dj"
+                            :style="{ color: router.currentRoute.value.fullPath.startsWith('/dj') ? 'black' : '#353535' }"
+                            to="/dj"
+                        >
+                            DJ
+                        </router-link>
                     </div>
                     <div class="header-router-right">
                         <router-link

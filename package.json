@@ -14,7 +14,9 @@
     "preview": "vite preview",
     "start": "nodemon --exec electron . --watch ./ --ext js,vue,html,css,json",
     "_dist": "vite build && node scripts/build.js -p always",
-    "dist": "vite build && node scripts/build.js -p never"
+    "dist": "vite build && node scripts/build.js -p never",
+    "build:engine": "cargo build --release --manifest-path audio-engine/Cargo.toml",
+    "dist:full": "npm run build:engine && npm run dist"
   },
   "dependencies": {
     "@neteasecloudmusicapienhanced/api": "^4.29.11",

@@ -73,6 +73,18 @@ const globalZoomOptions = ref([
     { label: '150%', value: 1.5 },
 ])
 const commentFontSize = ref(13)
+const eqEnabled = ref(false)
+const eqBands = ref([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+const eqPreset = ref('flat')
+const EQ_FREQUENCIES = ['31', '63', '125', '250', '500', '1k', '2k', '4k', '8k', '16k']
+const EQ_PRESETS = {
+    flat: { label: '平坦', bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+    bass: { label: '低音增强', bands: [6, 5, 4, 2, 0, 0, 0, 0, 0, 0] },
+    vocal: { label: '人声', bands: [-2, -1, 0, 2, 4, 4, 3, 1, 0, -1] },
+    electronic: { label: '电子', bands: [4, 3, 0, -2, 0, 2, 4, 5, 4, 3] },
+    rock: { label: '摇滚', bands: [4, 3, 1, 0, -1, 0, 2, 3, 4, 4] },
+    classical: { label: '古典', bands: [0, 0, 0, 0, 0, 0, -2, -2, -2, -4] },
+}
 const globalShortcuts = ref(false)
 const quitApp = ref('minimize')
 const quitAppOptions = ref([
@@ -141,6 +153,14 @@ const applySettingsToForm = settings => {
     searchAssistLimit.value = normalizeSearchAssistLimit(settings.music.searchAssistLimit)
     playerStore.showSongTranslation = settings?.music?.showSongTranslation !== false
     commentFontSize.value = Number(settings?.music?.commentFontSize) || 13
+    eqEnabled.value = settings?.music?.eqEnabled === true
+    eqPreset.value = settings?.music?.eqPreset || 'flat'
+    const savedBands = settings?.music?.eqBands
+    if (Array.isArray(savedBands) && savedBands.length === 10) {
+        eqBands.value = savedBands.map(v => Number(v) || 0)
+    } else {
+        eqBands.value = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    }
     globalZoom.value = Number(settings?.other?.globalZoom) || 1
     videoFolder.value = settings.local.videoFolder
     downloadFolder.value = settings.local.downloadFolder
@@ -245,6 +265,9 @@ const setAppSettings = () => {
             searchAssistLimit: normalizeSearchAssistLimit(searchAssistLimit.value),
             showSongTranslation: playerStore.showSongTranslation,
             commentFontSize: commentFontSize.value,
+            eqEnabled: eqEnabled.value,
+            eqBands: eqBands.value,
+            eqPreset: eqPreset.value,
         },
         local: {
             videoFolder: videoFolder.value,
@@ -290,6 +313,53 @@ watch(globalZoom, val => {
 watch(commentFontSize, val => {
     const size = Math.max(8, Math.min(32, Number(val) || 13))
     playerStore.commentFontSize = size
+})
+
+// EQ 辅助函数
+function formatEqDb(val) {
+    const v = val || 0
+    return (v >= 0 ? '+' : '') + v.toFixed(1)
+}
+
+function handleEqBandChange(index, e) {
+    const val = Number(e.target.value) || 0
+    eqBands.value[index] = val
+    playerStore.eqBands = [...eqBands.value]
+    eqPreset.value = 'custom'
+    playerStore.eqPreset = 'custom'
+    applyEqToEngine()
+}
+
+function applyEqPreset(key) {
+    const preset = EQ_PRESETS[key]
+    if (!preset) return
+    eqBands.value = [...preset.bands]
+    eqPreset.value = key
+    playerStore.eqBands = [...preset.bands]
+    playerStore.eqPreset = key
+    applyEqToEngine()
+}
+
+function applyEqToEngine() {
+    // 通过 DJ 引擎的全局 EQ 应用（如果引擎运行中）
+    try {
+        if (window.djApi && playerStore.eqEnabled) {
+            window.djApi.call('eq.setGlobalEnabled', { enabled: true })
+            window.djApi.call('eq.setGlobal', { bands: eqBands.value })
+        }
+    } catch (_) {}
+}
+
+watch(eqEnabled, val => {
+    playerStore.eqEnabled = val
+    try {
+        if (window.djApi) {
+            window.djApi.call('eq.setGlobalEnabled', { enabled: val })
+            if (val) {
+                window.djApi.call('eq.setGlobal', { bands: eqBands.value })
+            }
+        }
+    } catch (_) {}
 })
 
 // ============================================================================
@@ -1248,6 +1318,45 @@ const clearFmRecent = () => {
                                 <input v-model="commentFontSize" name="commentFontSize" />
                             </div>
                         </div>
+
+                        <!-- 均衡器 -->
+                        <div class="option">
+                            <div class="option-name">均衡器</div>
+                            <div class="option-operation">
+                                <div class="eq-toggle" @click="eqEnabled = !eqEnabled">
+                                    <div class="toggle-switch" :class="{ active: eqEnabled }">
+                                        <div class="toggle-knob"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="eq-section" v-if="eqEnabled">
+                            <div class="eq-presets">
+                                <button
+                                    v-for="(preset, key) in EQ_PRESETS"
+                                    :key="key"
+                                    class="eq-preset-btn"
+                                    :class="{ active: eqPreset === key }"
+                                    @click="applyEqPreset(key)"
+                                >
+                                    {{ preset.label }}
+                                </button>
+                            </div>
+                            <div class="eq-sliders">
+                                <div class="eq-band" v-for="(freq, i) in EQ_FREQUENCIES" :key="freq">
+                                    <div class="eq-db">{{ formatEqDb(eqBands[i]) }}</div>
+                                    <input
+                                        type="range"
+                                        class="eq-slider-vertical"
+                                        min="-12" max="12" step="0.5"
+                                        :value="eqBands[i]"
+                                        @input="handleEqBandChange(i, $event)"
+                                        orient="vertical"
+                                    />
+                                    <div class="eq-freq">{{ freq }}</div>
+                                </div>
+                            </div>
+                        </div>
                         <div class="option">
                             <div class="option-name">歌词字体大小</div>
                             <div class="option-operation">
@@ -2010,5 +2119,121 @@ const clearFmRecent = () => {
 .toggle-enter-from,
 .toggle-leave-to {
     transform: translateX(-100%);
+}
+
+// 均衡器样式
+.eq-section {
+    padding: 8px 20px 16px;
+}
+
+.eq-presets {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.eq-preset-btn {
+    background: var(--layer);
+    border: 1px solid transparent;
+    color: var(--muted-text);
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.15s;
+
+    &.active {
+        border-color: var(--text);
+        color: var(--text);
+    }
+
+    &:hover {
+        background: var(--border);
+    }
+}
+
+.eq-sliders {
+    display: flex;
+    gap: 4px;
+    justify-content: space-between;
+    align-items: stretch;
+    height: 140px;
+}
+
+.eq-band {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+}
+
+.eq-db {
+    font-family: 'Bender-Bold', monospace;
+    font-size: 9px;
+    color: var(--muted-text);
+    min-width: 32px;
+    text-align: center;
+}
+
+.eq-slider-vertical {
+    writing-mode: vertical-lr;
+    direction: rtl;
+    -webkit-appearance: none;
+    appearance: none;
+    width: 4px;
+    flex: 1;
+    background: var(--layer);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+
+    &::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--text);
+        cursor: pointer;
+    }
+}
+
+.eq-freq {
+    font-size: 9px;
+    color: var(--muted-text);
+    letter-spacing: 0.3px;
+}
+
+.eq-toggle {
+    cursor: pointer;
+}
+
+.toggle-switch {
+    width: 36px;
+    height: 20px;
+    background: var(--layer);
+    border-radius: 10px;
+    position: relative;
+    transition: background 0.2s;
+
+    &.active {
+        background: rgba(100, 200, 100, 0.5);
+    }
+}
+
+.toggle-knob {
+    width: 16px;
+    height: 16px;
+    background: var(--text);
+    border-radius: 50%;
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    transition: transform 0.2s;
+
+    .active & {
+        transform: translateX(16px);
+    }
 }
 </style>

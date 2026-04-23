@@ -348,6 +348,16 @@ contextBridge.exposeInMainWorld('playerApi', {
   },
 });
 
+// DJ 音频引擎 API
+contextBridge.exposeInMainWorld('djApi', {
+    start: () => ipcRenderer.invoke('dj:start'),
+    call: (method, params) => ipcRenderer.invoke('dj:call', method, params),
+    stop: () => ipcRenderer.invoke('dj:stop'),
+    isRunning: () => ipcRenderer.invoke('dj:isRunning'),
+    subscribe: () => ipcRenderer.send('dj:subscribe'),
+    onEvent: (callback) => subscribeChannel('dj:event', (_e, data) => callback(data)),
+})
+
 // 这里安全地暴露必要的接口
 contextBridge.exposeInMainWorld('process', {
   platform: process.platform,

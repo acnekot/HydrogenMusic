@@ -12,7 +12,7 @@ import { migrateLegacyAuthSession } from './authority'
 import { getSettingsSnapshot, setCachedSettingsSnapshot } from './settingsSnapshot'
 
 const playerStore = usePlayerStore()
-const { quality, lyricSize, tlyricSize, rlyricSize, lyricInterludeTime, searchAssistLimit, showSongTranslation, globalZoom, commentFontSize } = storeToRefs(playerStore)
+const { quality, lyricSize, tlyricSize, rlyricSize, lyricInterludeTime, searchAssistLimit, showSongTranslation, globalZoom, commentFontSize, eqEnabled, eqBands, eqPreset } = storeToRefs(playerStore)
 const localStore = useLocalStore()
 const userStore = useUserStore()
 
@@ -97,6 +97,17 @@ export function applySettingsSnapshot(settings, options = {}) {
     const cfSize = Number(normalizedSettings?.music?.commentFontSize)
     if (Number.isFinite(cfSize) && cfSize > 0) {
         commentFontSize.value = cfSize
+    }
+
+    // 全局均衡器
+    if (normalizedSettings?.music?.eqEnabled !== undefined) {
+        eqEnabled.value = normalizedSettings.music.eqEnabled === true
+    }
+    if (Array.isArray(normalizedSettings?.music?.eqBands) && normalizedSettings.music.eqBands.length === 10) {
+        eqBands.value = normalizedSettings.music.eqBands.map(v => Number(v) || 0)
+    }
+    if (normalizedSettings?.music?.eqPreset) {
+        eqPreset.value = normalizedSettings.music.eqPreset
     }
 
     applyLocalSettings(normalizedSettings, options)

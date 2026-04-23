@@ -69,6 +69,10 @@ export const usePlayerStore = defineStore('playerStore', {
             coverBlur: false, // 播放页使用封面模糊背景
             globalZoom: 1, // 全局缩放比例
             commentFontSize: 13, // 评论区字体大小
+            // 全局均衡器
+            eqEnabled: false,
+            eqBands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // 10段: 31,63,125,250,500,1k,2k,4k,8k,16k Hz
+            eqPreset: 'flat',
         }
     },
     actions: {
@@ -113,6 +117,9 @@ export const usePlayerStore = defineStore('playerStore', {
             'lyricVisualizerRadialCoreSize',
             'globalZoom',
             'commentFontSize',
+            'eqEnabled',
+            'eqBands',
+            'eqPreset',
         ]
     },
 })

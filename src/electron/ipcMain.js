@@ -13,6 +13,7 @@ try {
 }
 // const jsmediatags = require("jsmediatags");
 const registerShortcuts = require('./shortcuts')
+const audioEngine = require('./audioEngine')
 const Store = require('electron-store').default;
 const CancelToken = axios.CancelToken
 
@@ -697,6 +698,46 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     ipcMain.on('set-zoom', (e, factor) => {
         const zoom = Math.max(0.5, Math.min(3, Number(factor) || 1))
         win.webContents.setZoomFactor(zoom)
+    })
+
+    // ===== DJ Audio Engine =====
+    ipcMain.handle('dj:start', async () => {
+        try {
+            await audioEngine.startEngine(app)
+            return { ok: true }
+        } catch (e) {
+            return { ok: false, error: e.message }
+        }
+    })
+
+    ipcMain.handle('dj:call', async (e, method, params) => {
+        try {
+            return await audioEngine.call(method, params)
+        } catch (err) {
+            throw err
+        }
+    })
+
+    ipcMain.on('dj:subscribe', (e) => {
+        const removeListener = audioEngine.onEvent((event) => {
+            try {
+                if (!e.sender.isDestroyed()) {
+                    e.sender.send('dj:event', event)
+                }
+            } catch (_) {}
+        })
+
+        // 当渲染进程重载时清理
+        e.sender.once('destroyed', removeListener)
+    })
+
+    ipcMain.handle('dj:stop', async () => {
+        audioEngine.stopEngine()
+        return { ok: true }
+    })
+
+    ipcMain.handle('dj:isRunning', () => {
+        return audioEngine.isRunning()
     })
 
     ipcMain.on('set-settings', (e, settings) => {

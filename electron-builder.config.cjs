@@ -88,6 +88,13 @@ module.exports = {
     '**/node_modules/sharp/**',
     '**/node_modules/ffmpeg-static/**',
   ],
+  extraResources: [
+    {
+      from: 'audio-engine/target/release/',
+      to: '.',
+      filter: ['hydrogen-audio-engine', 'hydrogen-audio-engine.exe'],
+    },
+  ],
   directories: {
     output: 'release/${version}',
   },

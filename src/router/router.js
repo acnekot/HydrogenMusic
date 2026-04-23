@@ -15,6 +15,7 @@ const RecommendSongs = () => import('../components/RecommendSongs.vue')
 const LocalMusicDetail = () => import('../components/LocalMusicDetail.vue')
 const SearchResult = () => import('../views/SearchResult.vue')
 const Settings = () => import('../views/Settings.vue')
+const DJPage = () => import('../views/DJPage.vue')
 const RadioDetail = () => import('../components/RadioDetail.vue')
 
 import { useUserStore } from '../store/userStore'
@@ -197,6 +198,14 @@ const routes = [
         path: '/settings',
         name: 'settings',
         component: Settings,
+        beforeEnter: (to, from, next) => {
+            next()
+        }
+    },
+    {
+        path: '/dj',
+        name: 'dj',
+        component: DJPage,
         beforeEnter: (to, from, next) => {
             next()
         }
