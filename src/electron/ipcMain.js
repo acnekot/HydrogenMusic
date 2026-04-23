@@ -694,6 +694,11 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         return normalized
     }
 
+    ipcMain.on('set-zoom', (e, factor) => {
+        const zoom = Math.max(0.5, Math.min(3, Number(factor) || 1))
+        win.webContents.setZoomFactor(zoom)
+    })
+
     ipcMain.on('set-settings', (e, settings) => {
         const parsedSettings = JSON.parse(settings)
         if (!parsedSettings.music) parsedSettings.music = {}

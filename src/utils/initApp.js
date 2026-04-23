@@ -12,7 +12,7 @@ import { migrateLegacyAuthSession } from './authority'
 import { getSettingsSnapshot, setCachedSettingsSnapshot } from './settingsSnapshot'
 
 const playerStore = usePlayerStore()
-const { quality, lyricSize, tlyricSize, rlyricSize, lyricInterludeTime, searchAssistLimit, showSongTranslation } = storeToRefs(playerStore)
+const { quality, lyricSize, tlyricSize, rlyricSize, lyricInterludeTime, searchAssistLimit, showSongTranslation, globalZoom, commentFontSize } = storeToRefs(playerStore)
 const localStore = useLocalStore()
 const userStore = useUserStore()
 
@@ -88,6 +88,16 @@ export function applySettingsSnapshot(settings, options = {}) {
     lyricInterludeTime.value = normalizedSettings?.music?.lyricInterlude
     searchAssistLimit.value = normalizeSearchAssistLimit(normalizedSettings?.music?.searchAssistLimit)
     showSongTranslation.value = normalizedSettings?.music?.showSongTranslation !== false
+
+    const zoom = Number(normalizedSettings?.other?.globalZoom)
+    if (Number.isFinite(zoom) && zoom > 0) {
+        globalZoom.value = zoom
+        windowApi.setZoom(zoom)
+    }
+    const cfSize = Number(normalizedSettings?.music?.commentFontSize)
+    if (Number.isFinite(cfSize) && cfSize > 0) {
+        commentFontSize.value = cfSize
+    }
 
     applyLocalSettings(normalizedSettings, options)
     return normalizedSettings

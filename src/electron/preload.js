@@ -214,6 +214,10 @@ function toFileUrl(filePathOrUrl) {
 }
 
 
+function setZoom(factor) {
+    ipcRenderer.send('set-zoom', factor)
+}
+
 contextBridge.exposeInMainWorld('windowApi', {
     windowMin,
     windowMax,
@@ -282,6 +286,7 @@ contextBridge.exposeInMainWorld('windowApi', {
     setWindowTile,
     updatePlaylistStatus,
     updateDockMenu,
+    setZoom,
 })
 
 // 新的API用于处理登录功能和桌面歌词

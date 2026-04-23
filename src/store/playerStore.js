@@ -67,6 +67,8 @@ export const usePlayerStore = defineStore('playerStore', {
             showSongTranslation: true, // 歌曲名是否显示翻译（原名 (翻译)）
             isDesktopLyricOpen: false, // 桌面歌词是否打开
             coverBlur: false, // 播放页使用封面模糊背景
+            globalZoom: 1, // 全局缩放比例
+            commentFontSize: 13, // 评论区字体大小
         }
     },
     actions: {
@@ -109,6 +111,8 @@ export const usePlayerStore = defineStore('playerStore', {
             'lyricVisualizerRadialOffsetX',
             'lyricVisualizerRadialOffsetY',
             'lyricVisualizerRadialCoreSize',
+            'globalZoom',
+            'commentFontSize',
         ]
     },
 })

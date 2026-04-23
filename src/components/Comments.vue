@@ -13,7 +13,7 @@ const emit = defineEmits(['total-change'])
 
 const playerStore = usePlayerStore()
 const userStore = useUserStore()
-const { songId, songList, currentIndex, listInfo } = storeToRefs(playerStore)
+const { songId, songList, currentIndex, listInfo, commentFontSize } = storeToRefs(playerStore)
 const currentTrack = computed(() => {
     const list = songList.value || []
     const idx = typeof currentIndex.value === 'number' ? currentIndex.value : 0
@@ -629,7 +629,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-    <div class="arknights-comments" ref="commentsContainerRef" @scroll.passive="handleCommentsScroll">
+    <div class="arknights-comments" ref="commentsContainerRef" @scroll.passive="handleCommentsScroll" :style="{ '--comment-font-size': (commentFontSize || 13) + 'px' }">
         <!-- 评论区主标题 -->
         <div class="comments-header">
             <div class="header-frame">
@@ -1445,7 +1445,7 @@ onUnmounted(() => {
 // 评论内容 - 更新为适配CommentText组件
 .comment-text {
     font-family: SourceHanSansCN-Bold;
-    font-size: 13px;
+    font-size: var(--comment-font-size, 13px);
     color: rgba(0, 0, 0, 0.85);
     line-height: 1.45;
     margin-bottom: 9px;

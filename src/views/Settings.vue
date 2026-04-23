@@ -62,6 +62,17 @@ const tlyricSize = ref(13)
 const rlyricSize = ref(12)
 const lyricInterlude = ref(13)
 const searchAssistLimit = ref(8)
+const globalZoom = ref(1)
+const globalZoomOptions = ref([
+    { label: '75%', value: 0.75 },
+    { label: '80%', value: 0.8 },
+    { label: '90%', value: 0.9 },
+    { label: '100%', value: 1 },
+    { label: '110%', value: 1.1 },
+    { label: '125%', value: 1.25 },
+    { label: '150%', value: 1.5 },
+])
+const commentFontSize = ref(13)
 const globalShortcuts = ref(false)
 const quitApp = ref('minimize')
 const quitAppOptions = ref([
@@ -129,6 +140,8 @@ const applySettingsToForm = settings => {
     lyricInterlude.value = settings.music.lyricInterlude
     searchAssistLimit.value = normalizeSearchAssistLimit(settings.music.searchAssistLimit)
     playerStore.showSongTranslation = settings?.music?.showSongTranslation !== false
+    commentFontSize.value = Number(settings?.music?.commentFontSize) || 13
+    globalZoom.value = Number(settings?.other?.globalZoom) || 1
     videoFolder.value = settings.local.videoFolder
     downloadFolder.value = settings.local.downloadFolder
     downloadCreateSongFolder.value = !!settings.local.downloadCreateSongFolder
@@ -171,8 +184,9 @@ onActivated(() => {
     // 设置更新事件监听器
     setupUpdateListeners()
 })
+})
 
-// 当从“首页/子页”切换到“主播放器界面”（widgetState: true -> false）时，
+// 当从”首页/子页”切换到”主播放器界面”（widgetState: true -> false）时，
 // 如果当前仍处于设置路由，则自动保存设置（避免未发生路由切换导致 onBeforeRouteLeave 不触发）。
 watch(
     () => playerStore.widgetState,
@@ -230,6 +244,7 @@ const setAppSettings = () => {
             lyricInterlude: lyricInterlude.value,
             searchAssistLimit: normalizeSearchAssistLimit(searchAssistLimit.value),
             showSongTranslation: playerStore.showSongTranslation,
+            commentFontSize: commentFontSize.value,
         },
         local: {
             videoFolder: videoFolder.value,
@@ -242,6 +257,7 @@ const setAppSettings = () => {
         other: {
             globalShortcuts: globalShortcuts.value,
             quitApp: quitApp.value,
+            globalZoom: globalZoom.value,
         },
         customBackground: {
             enabled: playerStore.customBackgroundEnabled,
@@ -262,6 +278,19 @@ const setAppSettings = () => {
 
 // apply theme immediately when user changes
 watch(theme, val => setTheme(val))
+
+// apply zoom immediately when user changes
+watch(globalZoom, val => {
+    const zoom = Math.max(0.5, Math.min(3, Number(val) || 1))
+    playerStore.globalZoom = zoom
+    windowApi.setZoom(zoom)
+})
+
+// sync comment font size to store immediately
+watch(commentFontSize, val => {
+    const size = Math.max(8, Math.min(32, Number(val) || 13))
+    playerStore.commentFontSize = size
+})
 
 // ============================================================================
 // 自定义背景 + 歌词音频可视化（来自 fork）
@@ -1205,6 +1234,18 @@ const clearFmRecent = () => {
                             <div class="option-name">搜索下拉条目数量</div>
                             <div class="option-operation">
                                 <input v-model="searchAssistLimit" name="searchAssistLimit" />
+                            </div>
+                        </div>
+                        <div class="option">
+                            <div class="option-name">全局缩放</div>
+                            <div class="option-operation">
+                                <Selector v-model="globalZoom" :options="globalZoomOptions" />
+                            </div>
+                        </div>
+                        <div class="option">
+                            <div class="option-name">评论区字体大小</div>
+                            <div class="option-operation">
+                                <input v-model="commentFontSize" name="commentFontSize" />
                             </div>
                         </div>
                         <div class="option">
