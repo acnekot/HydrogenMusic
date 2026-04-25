@@ -39,6 +39,7 @@ const {
     lyricVisualizerRadialOffsetX,
     lyricVisualizerRadialOffsetY,
     lyricVisualizerRadialCoreSize,
+    lyricFollowPosition,
     videoIsPlaying,
 } = storeToRefs(playerStore);
 
@@ -223,17 +224,23 @@ let resizeHandler = null;
 let resizeTarget = null;
 let visualizerBarLevels = null;
 let visualizerPauseState = false;
+let visualizerLastFrameTime = 0; // 上一帧的 performance.now()，用于帧时间补偿
+// 缓存画布显示尺寸，避免每帧读取 DOM clientWidth/clientHeight 触发强制布局
+let cachedCanvasDisplayWidth = 0;
+let cachedCanvasDisplayHeight = 0;
 
 const syncAnalyserConfig = () => {
     const analyser = audioEnv.analyser;
     if (!analyser) return;
-    const fftSize = 2048;
+    // fftSize 512 → 每帧约 11ms 音频数据，响应更紧跟节拍
+    const fftSize = 512;
     if (analyser.fftSize !== fftSize) {
         analyser.fftSize = fftSize;
         analyserDataArray = new Uint8Array(analyser.frequencyBinCount);
     } else if (!analyserDataArray || analyserDataArray.length !== analyser.frequencyBinCount) {
         analyserDataArray = new Uint8Array(analyser.frequencyBinCount);
     }
+    // smoothingTimeConstant 降低到 0.5，减少内置平滑带来的延迟
     analyser.smoothingTimeConstant = visualizerSmoothing.value;
 };
 
@@ -252,12 +259,15 @@ const resetVisualizerLevels = () => {
     visualizerBarLevels = null;
 };
 
-const updateVisualizerLevels = (size, resolveTarget, { paused = false } = {}) => {
+const updateVisualizerLevels = (size, resolveTarget, deltaMultiplier = 1) => {
     const levels = ensureVisualizerLevels(size);
     if (!levels) return 0;
-    const attack = paused ? 0.2 : 0.55;
-    const release = paused ? 0.6 : 0.1;
     let peak = 0;
+
+    // 基准 attack/release 按 60fps 设计；帧时间补偿让慢帧追更多、快帧追更少
+    // 公式：1 - (1 - rate)^(deltaMultiplier)，在低帧率下等效于多步累加
+    const attack = 1 - Math.pow(1 - 0.55, deltaMultiplier);
+    const release = 1 - Math.pow(1 - 0.1, deltaMultiplier);
     for (let index = 0; index < size; index++) {
         const target = Math.max(0, Math.min(1, resolveTarget(index) ?? 0));
         const current = levels[index] ?? 0;
@@ -265,11 +275,8 @@ const updateVisualizerLevels = (size, resolveTarget, { paused = false } = {}) =>
         if (target >= current) {
             nextValue = current + (target - current) * attack;
         } else {
-            const drop = release + current * 0.04;
+            const drop = release + current * (0.04 * deltaMultiplier);
             nextValue = current - Math.min(current - target, drop);
-        }
-        if (paused && target === 0 && nextValue < current) {
-            nextValue = Math.max(0, nextValue);
         }
         if (!Number.isFinite(nextValue)) nextValue = 0;
         nextValue = Math.max(0, Math.min(1, nextValue));
@@ -309,6 +316,8 @@ const updateVisualizerCanvasSize = () => {
     const canvas = lyricVisualizerCanvas.value;
     if (!canvas) {
         resetVisualizerContainerMetrics();
+        cachedCanvasDisplayWidth = 0;
+        cachedCanvasDisplayHeight = 0;
         return;
     }
     const hostElement = lyricScroll.value || canvas.parentElement || canvas;
@@ -327,6 +336,9 @@ const updateVisualizerCanvasSize = () => {
     if (typeof canvasCtx.resetTransform === 'function') canvasCtx.resetTransform();
     else canvasCtx.setTransform(1, 0, 0, 1, 0, 0);
     canvasCtx.scale(dpr, dpr);
+    // 缓存显示尺寸，供 renderVisualizerFrame 热路径使用
+    cachedCanvasDisplayWidth = displayWidth;
+    cachedCanvasDisplayHeight = displayHeight;
 };
 
 const ensureVisualizerSizeTracking = () => {
@@ -449,34 +461,44 @@ const setupVisualizer = async () => {
     ensureVisualizerSizeTracking();
 };
 
-const renderVisualizerFrame = () => {
+const renderVisualizerFrame = (now = performance.now()) => {
     if (!shouldShowVisualizer.value || !canvasCtx || !lyricVisualizerCanvas.value) return false;
-    const canvas = lyricVisualizerCanvas.value;
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
+    // 使用缓存尺寸，避免每帧读 DOM clientWidth/clientHeight 触发强制布局
+    const width = cachedCanvasDisplayWidth;
+    const height = cachedCanvasDisplayHeight;
     if (!width || !height) return true;
 
+    // 帧时间补偿：以 16.67ms（60fps）为基准，慢帧追更多、快帧追更少
+    const rawDelta = visualizerLastFrameTime > 0 ? now - visualizerLastFrameTime : 16.67;
+    // 限制最大补偿倍率为 3（避免页面切回/帧跳跃时过度追赶）
+    const deltaMultiplier = Math.min(rawDelta / 16.67, 3);
+    visualizerLastFrameTime = now;
+
+    const isPlaying = playing.value;
+    const paused = !isPlaying || visualizerPauseState;
+
     const analyser = audioEnv.analyser;
-    if (analyser && analyserDataArray) {
+    if (analyser) {
+        // 暂停时把 analyser 自身的平滑关掉，防止 AudioContext suspend/resume 时
+        // 内部缓冲残留值在恢复后混入新数据，产生"卡两下"的视觉跳变
+        analyser.smoothingTimeConstant = paused ? 0 : visualizerSmoothing.value;
+    }
+    if (!paused && analyser && analyserDataArray) {
         try { analyser.getByteFrequencyData(analyserDataArray); } catch (_) {}
     }
 
-    let silence = false;
-    if (analyserDataArray && analyserDataArray.length) {
-        let peakBin = 0;
-        for (let i = 0; i < analyserDataArray.length; i += 4) {
-            if (analyserDataArray[i] > peakBin) peakBin = analyserDataArray[i];
-        }
-        silence = peakBin < 6;
-    }
-
+    // 从响应式对象中提取当前帧所需的值，避免在热路径中反复触发 Vue 依赖追踪
     const { r, g, b } = visualizerColorRGB.value;
     const opacityRatio = visualizerOpacityRatio.value;
+    const freqMin = visualizerFrequencyMinValue.value;
+    const freqMax = visualizerFrequencyMaxValue.value;
+    const barCountRaw = visualizerBarCountValue.value;
+    const barWidthRatio = visualizerBarWidthRatio.value;
 
     const nyquist = audioEnv.audioContext ? audioEnv.audioContext.sampleRate / 2 : 22050;
     const binCount = analyserDataArray ? analyserDataArray.length : 0;
-    const frequencyMin = Math.max(0, Math.min(visualizerFrequencyMinValue.value, nyquist));
-    const frequencyMax = Math.max(frequencyMin + 10, Math.min(visualizerFrequencyMaxValue.value, nyquist));
+    const frequencyMin = Math.max(0, Math.min(freqMin, nyquist));
+    const frequencyMax = Math.max(frequencyMin + 10, Math.min(freqMax, nyquist));
     const minIndex = binCount
         ? Math.min(binCount - 1, Math.max(0, Math.floor((frequencyMin / nyquist) * binCount)))
         : 0;
@@ -485,38 +507,51 @@ const renderVisualizerFrame = () => {
         : 1;
     const rangeSize = Math.max(1, maxIndex - minIndex);
     const maxBars = 96;
-    const barCount = Math.max(1, Math.min(visualizerBarCountValue.value, maxBars));
+    const barCount = Math.max(1, Math.min(barCountRaw, maxBars));
     const step = rangeSize / barCount;
 
     const levels = ensureVisualizerLevels(barCount);
     if (!levels) return false;
 
-    const paused = !playing.value || visualizerPauseState || silence;
-    updateVisualizerLevels(
+    // 暂停时 target 强制为 0，播放时从 analyser 读数据
+    // 两种状态共用同一套 attack/release 平滑逻辑，过渡不会突变
+    const peak = updateVisualizerLevels(
         barCount,
-        index => {
-            if (!analyserDataArray || !binCount) return 0;
-            const samplePosition = minIndex + (index + 0.5) * step;
-            const dataIndex = Math.min(binCount - 1, Math.max(0, Math.floor(samplePosition)));
-            return analyserDataArray[dataIndex] / 255;
-        },
-        { paused }
+        paused
+            ? () => 0
+            : index => {
+                if (!analyserDataArray || !binCount) return 0;
+                const samplePosition = minIndex + (index + 0.5) * step;
+                const dataIndex = Math.min(binCount - 1, Math.max(0, Math.floor(samplePosition)));
+                return analyserDataArray[dataIndex] / 255;
+            },
+        deltaMultiplier
     );
 
     canvasCtx.clearRect(0, 0, width, height);
 
+    // 当所有频谱条完全衰减至 0 时跳过绘制
+    if (peak < 0.002) return true;
+
     const barWidth = width / barCount;
-    const innerWidth = barWidth * Math.min(Math.max(visualizerBarWidthRatio.value, 0.01), 1);
+    const innerWidth = barWidth * Math.min(Math.max(barWidthRatio, 0.01), 1);
     const offset = (barWidth - innerWidth) / 2;
 
+    // 仅在 alpha 不同时更新 fillStyle，减少字符串分配
+    let lastAlpha = -1;
     for (let i = 0; i < barCount; i++) {
         const value = levels[i] ?? 0;
+        if (value < 0.002) continue;
         const barHeight = height * value;
         const x = i * barWidth + offset;
         const y = height - barHeight;
         const baseAlpha = 0.15 + value * 0.5;
         const alpha = Math.min(Math.max(baseAlpha * opacityRatio, 0), 1);
-        canvasCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        const alphaRounded = Math.round(alpha * 1000) / 1000;
+        if (alphaRounded !== lastAlpha) {
+            canvasCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alphaRounded})`;
+            lastAlpha = alphaRounded;
+        }
         canvasCtx.fillRect(x, y, innerWidth, barHeight);
     }
 
@@ -526,20 +561,21 @@ const renderVisualizerFrame = () => {
 const startVisualizerLoop = ({ force = false } = {}) => {
     if (!shouldShowVisualizer.value || !lyricVisualizerCanvas.value || !canvasCtx) return;
     updateVisualizerCanvasSize();
+    visualizerLastFrameTime = 0; // 重置帧时间，防止第一帧 delta 过大
     if (animationFrameId) {
         if (!force) return;
         cancelAnimationFrame(animationFrameId);
         animationFrameId = null;
     }
-    const draw = () => {
-        const keepGoing = renderVisualizerFrame();
+    const draw = (now) => {
+        const keepGoing = renderVisualizerFrame(now);
         if (keepGoing === false) {
             animationFrameId = null;
             return;
         }
         animationFrameId = requestAnimationFrame(draw);
     };
-    draw();
+    animationFrameId = requestAnimationFrame(draw);
 };
 
 const stopVisualizerLoop = ({ clear = false, teardown = false } = {}) => {
@@ -548,13 +584,15 @@ const stopVisualizerLoop = ({ clear = false, teardown = false } = {}) => {
         animationFrameId = null;
     }
     if (canvasCtx && lyricVisualizerCanvas.value && clear) {
-        const width = lyricVisualizerCanvas.value.clientWidth;
-        const height = lyricVisualizerCanvas.value.clientHeight;
+        const width = cachedCanvasDisplayWidth || lyricVisualizerCanvas.value.clientWidth;
+        const height = cachedCanvasDisplayHeight || lyricVisualizerCanvas.value.clientHeight;
         canvasCtx.clearRect(0, 0, width, height);
     }
     if (clear || teardown) {
         resetVisualizerLevels();
         visualizerPauseState = false;
+        cachedCanvasDisplayWidth = 0;
+        cachedCanvasDisplayHeight = 0;
     }
     if (teardown) {
         detachVisualizerSizeTracking();
@@ -574,7 +612,6 @@ const interludeRemainingTime = ref(null);
 const interludeFastClose = ref(false);
 let interludeInTimer = null;
 let interludeOutTimer = null;
-let interludeProgressInterval = null;
 // 在“上一句预计结束”时再启动间奏的延迟定时器（启发式）
 let interludeDeferStartTimer = null;
 let manualScrollReleaseTimer = null;
@@ -592,14 +629,14 @@ const MANUAL_SCROLL_IDLE_MS = 1000;
 const LYRIC_SCROLL_SYNC_TOLERANCE_PX = 2;
 const LYRIC_AUTO_SCROLL_DURATION_MS = 580;
 const LYRIC_AUTO_SCROLL_EASING = 'cubic-bezier(0.4, 0, 0.12, 1)';
-const LYRIC_FOLLOW_TOP_OFFSET_PX = 260;
+const LYRIC_FOLLOW_TOP_OFFSET_RATIO = 0.38; // fallback，实际由 lyricFollowPosition 决定
 const LYRIC_FOLLOW_BOTTOM_GUTTER_PX = 180;
 const LYRIC_FOLLOW_VISIBLE_GUTTER_PX = 24;
 
 // 切回歌词时抑制首帧闪烁（先隐藏，定位完成后再显示）
 const suppressLyricFlash = ref(true);
 const lyricAreaReady = ref(false);
-const lyricTopSpacerHeight = ref(LYRIC_FOLLOW_TOP_OFFSET_PX);
+const lyricTopSpacerHeight = ref(260);
 const lyricBottomSpacerHeight = ref(LYRIC_FOLLOW_BOTTOM_GUTTER_PX);
 
 // 在高频同步中避免并发测量
@@ -790,11 +827,17 @@ function getLyricContentLineElement(index) {
 }
 
 function getLyricFollowTopOffset(scrollEl, wrapperHeight = 0) {
-    if (!scrollEl) return LYRIC_FOLLOW_TOP_OFFSET_PX;
+    if (!scrollEl) return 260;
 
     const safeWrapperHeight = Math.max(0, wrapperHeight);
+    const pos = lyricFollowPosition.value || 'center';
+    let ratio;
+    if (pos === 'top') ratio = 0.15;
+    else if (pos === 'bottom') ratio = 0.62;
+    else ratio = LYRIC_FOLLOW_TOP_OFFSET_RATIO; // center
+    const targetOffset = Math.round(scrollEl.clientHeight * ratio);
     const maxVisibleTop = Math.max(0, scrollEl.clientHeight - safeWrapperHeight - LYRIC_FOLLOW_VISIBLE_GUTTER_PX);
-    return Math.min(LYRIC_FOLLOW_TOP_OFFSET_PX, maxVisibleTop);
+    return Math.min(targetOffset, maxVisibleTop);
 }
 
 function updateLyricScrollSpacers(wrapperHeight = 0) {
@@ -1017,10 +1060,13 @@ function enterManualScrollMode() {
 
 const clearLycAnimation = flag => {
     if (flag) isLyricDelay.value = false;
-    for (let i = 0; i < lyricEle.value.length; i++) {
-        lyricEle.value[i].style.transitionDelay = 0 + 's';
+    const eles = lyricEle.value;
+    const hasBlur = lyricBlur.value;
+    const zeroSec = '0s';
+    for (let i = 0; i < eles.length; i++) {
+        eles[i].style.transitionDelay = zeroSec;
         // 当启用歌词模糊时，移除内联 filter 以便使用样式表控制
-        if (lyricBlur.value) lyricEle.value[i].firstChild.style.removeProperty('filter');
+        if (hasBlur) eles[i].firstChild.style.removeProperty('filter');
     }
     if (flag) {
         const forbidDelayTimer = setTimeout(() => {
@@ -1150,6 +1196,32 @@ const prepareLyricReveal = async () => {
     if (!showLyricArea.value) return;
 
     const token = createLyricRevealToken();
+
+    // 快速通道：字体已加载完毕时直接显示，趁 fade 渐入动画（250ms）完成位置同步
+    // 避免"先隐藏再等待再显示"造成的 250-500ms 可感知延迟
+    const fontsAlreadyReady =
+        typeof document !== 'undefined' &&
+        document.fonts != null &&
+        document.fonts.status === 'loaded';
+
+    if (fontsAlreadyReady) {
+        suppressLyricFlash.value = false;
+        lyricAreaReady.value = true;
+        await nextTick();
+        if (!isLyricRevealTokenActive(token) || !showLyricArea.value) return;
+        // 快速位置同步（不调用 setDefaultStyle 以免其内部 lyricAreaReady=false 触发闪烁）
+        lycCurrentIndex.value = currentLyricIndex.value >= 0 ? currentLyricIndex.value : -1;
+        interludeAnimation.value = false;
+        lyricEle.value = getLyricLineElements();
+        updateLyricScrollSpacers();
+        await waitForLayoutCommit();
+        if (!isLyricRevealTokenActive(token) || !showLyricArea.value) return;
+        lyricEle.value = getLyricLineElements();
+        syncLyricPosition({ force: true });
+        return;
+    }
+
+    // 慢速通道：字体尚未加载（通常只在首次打开时触发），保留原有抑制闪烁逻辑
     suppressLyricFlash.value = true;
     lyricAreaReady.value = false;
 
@@ -1323,14 +1395,16 @@ function handleInterludeOnProgress() {
     }
 }
 
-// Resize 触发同步：容器尺寸改变后重新测量与同步
+// Resize 触发同步：容器尺寸改变后重新测量与同步（debounce 避免动画过程中逐帧重算）
 let lyricResizeObserver = null;
-let resizeRaf = 0;
+let resizeDebounceTimer = 0;
 const scheduleLayout = () => {
-    if (resizeRaf) cancelAnimationFrame(resizeRaf);
-    resizeRaf = requestAnimationFrame(async () => {
-        await applyLyricLayout({ syncBehavior: 'auto' });
-    });
+    if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
+    resizeDebounceTimer = setTimeout(async () => {
+        resizeDebounceTimer = 0;
+        const behavior = (lyricAreaReady.value && !suppressLyricFlash.value) ? 'smooth' : 'auto';
+        await applyLyricLayout({ syncBehavior: behavior });
+    }, 120);
 };
 
 // 仅在类型变化时做常规重算（显示/隐藏由可见性观察处理）
@@ -1340,6 +1414,20 @@ watch(
         await recalcLyricLayout({ syncBehavior: 'auto' });
     },
     { deep: true, flush: 'post' }
+);
+
+// 歌词字体大小变化时重新计算布局
+watch(
+    [lyricSize, tlyricSize, rlyricSize],
+    () => recalcLyricLayout({ syncBehavior: 'auto' }),
+    { flush: 'post' }
+);
+
+// 激活行位置预设变化时重新计算布局
+watch(
+    lyricFollowPosition,
+    () => recalcLyricLayout({ syncBehavior: 'instant' }),
+    { flush: 'post' }
 );
 
 // 当“间奏阈值”调整时，重新校准本歌演唱速率模型
@@ -1361,28 +1449,14 @@ watch(
     async (visible) => {
         if (visible) {
             await prepareLyricReveal();
+            if (shouldShowVisualizer.value) {
+                await nextTick();
+                ensureVisualizerSizeTracking();
+            }
             return;
         }
 
         invalidateLyricReveal();
-    },
-    { flush: 'post' }
-);
-
-watch(
-    [lyricSize, tlyricSize, rlyricSize],
-    () => recalcLyricLayout({ syncBehavior: 'auto' }),
-    { flush: 'post' }
-);
-
-// 当区域从隐藏 -> 显示时，确保可视化器尺寸同步
-watch(
-    lyricAreaVisible,
-    async (visible) => {
-        if (visible && shouldShowVisualizer.value) {
-            await nextTick();
-            ensureVisualizerSizeTracking();
-        }
     },
     { flush: 'post' }
 );
@@ -1563,14 +1637,9 @@ watch(
 watch(playing, isPlaying => {
     visualizerPauseState = !isPlaying;
     if (!shouldShowVisualizer.value) return;
-    nextTick(async () => {
-        await setupVisualizer();
-        if (isPlaying) startVisualizerLoop({ force: true });
-        else startVisualizerLoop();
-    });
+    if (isPlaying) startVisualizerLoop({ force: true });
+    else startVisualizerLoop();
 });
-
-watch([lyricSize, tlyricSize, rlyricSize], recalcLyricLayout, { flush: 'post' });
 
 // 增强版的当前歌词索引监听（统一复用 syncLyricPosition，避免重复逻辑导致状态不一致）
 const { currentLyricIndex } = storeToRefs(playerStore);
@@ -1656,7 +1725,6 @@ onUnmounted(() => {
     clearInterludeTimers();
     clearManualScrollReleaseTimer();
     cancelLyricScrollAnimation();
-    if (interludeProgressInterval) { clearInterval(interludeProgressInterval); interludeProgressInterval = null; }
     if (lyricWheelHandler && lyricScroll.value) {
         lyricScroll.value.removeEventListener('wheel', lyricWheelHandler);
         lyricWheelHandler = null;
@@ -1667,24 +1735,18 @@ onUnmounted(() => {
     } else {
         window.removeEventListener('resize', scheduleLayout);
     }
+    if (resizeDebounceTimer) { clearTimeout(resizeDebounceTimer); resizeDebounceTimer = 0; }
     stopVisualizerLoop({ clear: true, teardown: true });
     canvasCtx = null;
     analyserDataArray = null;
 });
 
-// 启动/停止 200ms 的进度轮询
+// 间奏进度同步由 progress watcher 驱动，playing/lyricShow 仅需在停止状态时清理（无额外 interval 需要清理）
 watch([playing, lyricShow], ([p, show]) => {
-    if (p && show) {
-        if (!interludeProgressInterval) {
-            interludeProgressInterval = setInterval(() => {
-                handleInterludeOnProgress();
-            }, 200);
-        }
-    } else {
-        if (interludeProgressInterval) {
-            clearInterval(interludeProgressInterval);
-            interludeProgressInterval = null;
-        }
+    if (!p || !show) {
+        // 间奏状态重置
+        interludeAnimation.value = false;
+        interludeRemainingTime.value = null;
     }
 });
 </script>

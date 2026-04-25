@@ -1,4 +1,4 @@
-const { ipcMain, shell, dialog, globalShortcut, Menu, clipboard } = require('electron')
+const { ipcMain, shell, dialog, globalShortcut, Menu, clipboard, BrowserWindow } = require('electron')
 const axios = require('axios')
 const fs = require('fs')
 const path = require('path')
@@ -789,7 +789,8 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     })
     ipcMain.handle('dialog:openFile', async () => {
         try {
-            const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+            const activeWin = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null
+            const { canceled, filePaths } = await dialog.showOpenDialog(activeWin, {
                 properties: ['openDirectory', 'createDirectory', 'promptToCreate']
             })
             if (canceled) return null

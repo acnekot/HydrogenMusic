@@ -149,21 +149,23 @@ const checkIsLike = computed(() => id => {
     return Array.isArray(userStore.likelist) && userStore.likelist.includes(id);
 });
 
-// 智能判断当前歌曲有哪些类型的歌词
-const hasOriginalLyric = computed(() => {
-    if (!lyricsObjArr.value || !Array.isArray(lyricsObjArr.value)) return false;
-    return lyricsObjArr.value.some(item => item.lyric && item.lyric.trim() !== '');
+// 智能判断当前歌曲有哪些类型的歌词（单次遍历）
+const lyricFlags = computed(() => {
+    const arr = lyricsObjArr.value;
+    if (!arr || !Array.isArray(arr)) return { original: false, trans: false, roma: false };
+    let original = false, trans = false, roma = false;
+    for (let i = 0; i < arr.length; i++) {
+        if (!original && arr[i].lyric && arr[i].lyric.trim() !== '') original = true;
+        if (!trans && arr[i].tlyric && arr[i].tlyric.trim() !== '') trans = true;
+        if (!roma && arr[i].rlyric && arr[i].rlyric.trim() !== '') roma = true;
+        if (original && trans && roma) break;
+    }
+    return { original, trans, roma };
 });
 
-const hasTransLyric = computed(() => {
-    if (!lyricsObjArr.value || !Array.isArray(lyricsObjArr.value)) return false;
-    return lyricsObjArr.value.some(item => item.tlyric && item.tlyric.trim() !== '');
-});
-
-const hasRomaLyric = computed(() => {
-    if (!lyricsObjArr.value || !Array.isArray(lyricsObjArr.value)) return false;
-    return lyricsObjArr.value.some(item => item.rlyric && item.rlyric.trim() !== '');
-});
+const hasOriginalLyric = computed(() => lyricFlags.value.original);
+const hasTransLyric = computed(() => lyricFlags.value.trans);
+const hasRomaLyric = computed(() => lyricFlags.value.roma);
 
 const toAlbum = () => {
     const currentSong = songList.value?.[currentIndex.value];

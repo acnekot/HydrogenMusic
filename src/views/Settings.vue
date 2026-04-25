@@ -935,6 +935,14 @@ const clearFmRecent = () => {
                             </div>
                         </div>
                         <div class="option">
+                            <div class="option-name">歌词激活行位置</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricFollowPosition" :options="[{label:'偏上',value:'top'},{label:'居中',value:'center'},{label:'偏下',value:'bottom'}]" />
+                                </div>
+                            </div>
+                        </div>
+                        <div class="option">
                             <div class="option-name">显示歌曲翻译</div>
                             <div class="option-operation">
                                 <div class="toggle" @click="playerStore.showSongTranslation = !playerStore.showSongTranslation">
