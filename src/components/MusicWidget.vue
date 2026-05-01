@@ -1,24 +1,28 @@
 <script setup>
-  import { computed, ref, watch} from 'vue'
+  import { computed, defineAsyncComponent, ref, watch} from 'vue'
   import { useRouter } from 'vue-router'
-  import { songTime2 } from '../utils/player';
+  import { songTime2 } from '../utils/time';
   import VueSlider from 'vue-slider-component'
   import '../assets/css/slider.css'
-  import PlayList from './PlayList.vue'
   import OverflowMarquee from './base/OverflowMarquee.vue'
 
-  import { startMusic, pauseMusic, playLast, playNext, changeProgress, changePlayMode, likeSong } from '../utils/player'
+  import { startMusic, pauseMusic, playLast, playNext, changeProgress, changePlayMode, likeSong } from '../utils/player/lazy'
   import { getDjDetail, subDj } from '../api/dj'
   import { useUserStore } from '../store/userStore'
   import { usePlayerStore } from '../store/playerStore'
   import { useOtherStore } from '../store/otherStore'
   import { storeToRefs } from 'pinia'
   import { getSongDisplayName } from '../utils/songName'
+  import { getIndexedSong } from '../utils/songList'
+  import { getSongCoverUrl, withCoverParam } from '../utils/coverBackdrop'
+  import { useStableImageSource } from '../composables/useStableImageSource'
+  const PlayList = defineAsyncComponent(() => import('./PlayList.vue'))
   const router = useRouter()
   const userStore = useUserStore()
   const playerStore = usePlayerStore()
   const otherStore = useOtherStore()
   const { currentMusic, playing, progress, playMode, songList, songId, currentIndex, volume, time, playlistWidgetShow, lyricShow, localBase64Img, listInfo, showSongTranslation, widgetState } =storeToRefs(playerStore)
+  const playlistWidgetLoaded = ref(false)
 
   const safeSliderRange = computed(() => {
     const currentTime = Number(time.value)
@@ -43,12 +47,10 @@
   })
   
   // 检查是否在FM模式
-  const isInFMMode = computed(() => {
-    return listInfo.value && listInfo.value.type === 'personalfm'
-  })
+  const isInFMMode = computed(() => listInfo.value?.type === 'personalfm')
 
   // 是否为电台(DJ)模式
-  const isDjMode = computed(() => listInfo.value && listInfo.value.type === 'dj')
+  const isDjMode = computed(() => listInfo.value?.type === 'dj')
 
   // 电台订阅状态
   const djSubed = ref(false)
@@ -66,23 +68,32 @@
   }
 
   watch(djRid, () => { djSubed.value = false; if (djRid.value) loadDjSubStatus() })
+  watch(playlistWidgetShow, (shown) => {
+    if (shown) playlistWidgetLoaded.value = true
+  })
   const showMusicTime = ref(false)
   const currentSong = computed(() => {
-    const list = Array.isArray(songList.value) ? songList.value : []
-    const idx = Number.isInteger(currentIndex.value) ? currentIndex.value : -1
-    return idx >= 0 && idx < list.length ? list[idx] : null
+    return getIndexedSong(songList.value, currentIndex.value)
   })
   const currentSongArtists = computed(() => Array.isArray(currentSong.value?.ar) ? currentSong.value.ar : [])
   const isCurrentLocalSong = computed(() => currentSong.value?.type === 'local')
   const isCurrentSirenSong = computed(() => currentSong.value?.source === 'siren')
+  const hasUserSession = computed(() => !!userStore.user?.userId)
+  const canShowSongLike = computed(() => (
+    hasUserSession.value
+    && !!currentSong.value
+    && !isCurrentLocalSong.value
+    && !isDjMode.value
+    && !isCurrentSirenSong.value
+  ))
   const currentSongCoverUrl = computed(() => {
-    const coverUrl = currentSong.value?.coverUrl || currentSong.value?.al?.picUrl || ''
-    return coverUrl ? `${coverUrl}?param=128y128` : ''
+    return withCoverParam(getSongCoverUrl(currentSong.value), 128)
   })
+  const displayedCurrentSongCoverUrl = useStableImageSource(currentSongCoverUrl)
   const currentSongDisplayName = computed(() => getSongDisplayName(currentSong.value, '', showSongTranslation.value))
 
   watch(() => volume.value, () => {
-    currentMusic.value.volume(volume.value)
+    currentMusic.value?.volume?.(volume.value)
   })
 
   const checkIsLike = computed(() => (id) => {
@@ -149,7 +160,7 @@
     </div>
     <div class="music-info">
         <div class="music-img" @click="showPlayer()">
-            <img v-if="currentSong && !isCurrentLocalSong && currentSongCoverUrl" :src="currentSongCoverUrl" alt="">
+            <img v-if="currentSong && !isCurrentLocalSong && displayedCurrentSongCoverUrl" :src="displayedCurrentSongCoverUrl" alt="">
             <img v-else-if="currentSong && isCurrentLocalSong && localBase64Img" :src="localBase64Img" alt="">
             <img v-else-if="currentSong && isCurrentLocalSong" src="https://p3.music.126.net/UeTuwE7pvjBpypWLudqukA==/3132508627578625.jpg?param=128y128" alt="">
             <div class="open-player">
@@ -172,10 +183,10 @@
     </div>
     <div class="music-right">
         <div class="music-control">
-            <svg @click="playLast()" class="control-icon" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200" viewBox="0 0 200 200" fill="none"><defs><rect id="path_0" x="0" y="0" width="200" height="200"/></defs><g opacity="1" transform="translate(0 0)  rotate(0 100 100)"><mask id="bg-mask-0" fill="white"><use xlink:href="#path_0"/></mask><g mask="url(#bg-mask-0)"><path id="arrow" style="fill:#CCCCCC" transform="translate(35.21963688171376 44.356081611360985)  rotate(-90 66.78036311828623 52.999999999999986)" opacity="0" d=""/><path id="arrow" style="stroke: currentColor; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(35.21963688171376 44.356081611360985)  rotate(-90 66.78036311828623 52.999999999999986)" d="M133.56,105.98L66.78,0L0,106 "/></g></g></svg>
-            <svg v-show="playing" @click="pauseMusic()" class="control-icon" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200" viewBox="0 0 200 200" fill="none"><defs><rect id="path_0" x="0" y="0" width="200" height="200"/></defs><g opacity="1" transform="translate(0 0)  rotate(0 100 100)"><mask id="bg-mask-0" fill="white"><use xlink:href="#path_0"/></mask><g mask="url(#bg-mask-0)"><path id="line2" style="fill:#000000" transform="translate(152 24)  rotate(0 0.0005 76)" opacity="1" d=""/><path id="line2" style="stroke: currentColor; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(152 24)  rotate(0 0.0005 76)" d="M0,0L0,152 "/><path id="line1" style="fill:#000000" transform="translate(48 24)  rotate(0 0.0005 76)" opacity="1" d=""/><path id="line1" style="stroke: currentColor; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(48 24)  rotate(0 0.0005 76)" d="M0,0L0,152 "/></g></g></svg>
-            <svg v-show="!playing" @click="startMusic()" class="control-icon" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200" viewBox="0 0 200 200" fill="none"><defs><rect id="path_0" x="0" y="0" width="200" height="200"/></defs><g opacity="1" transform="translate(0 0)  rotate(0 100 100)"><mask id="bg-mask-0" fill="white"><use xlink:href="#path_0"/></mask><g mask="url(#bg-mask-0)"><path id="三角形 1" fill-rule="evenodd" style="fill:#CCCCCC" transform="translate(0 12)  rotate(90 88 88)" opacity="0" d="M11.79,132L164.21,132L88,0L11.79,132Z "/><path id="三角形 1" style="stroke: currentColor; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(0 12)  rotate(90 88 88)" d="M11.79,132L164.21,132L88,0L11.79,132Z "/></g></g></svg>
-            <svg @click="playNext()" xmlns="http://www.w3.org/2000/svg" class="control-icon" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200" viewBox="0 0 200 200" fill="none"><defs><rect id="path_0" x="0" y="0" width="200" height="200"/></defs><g opacity="1" transform="translate(0 0)  rotate(0 100 100)"><mask id="bg-mask-0" fill="white"><use xlink:href="#path_0"/></mask><g mask="url(#bg-mask-0)"><path id="arrow" style="fill:#CCCCCC" transform="translate(35.21963688171376 44.356081611360985)  rotate(90 66.78036311828623 52.999999999999986)" opacity="0" d=""/><path id="arrow" style="stroke: currentColor; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(35.21963688171376 44.356081611360985)  rotate(90 66.78036311828623 52.999999999999986)" d="M133.56,105.98L66.78,0L0,106 "/></g></g></svg>
+            <svg @click="playLast()" class="control-icon" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="20" height="20" viewBox="0 0 200 200" fill="none"><defs><rect id="path_0" x="0" y="0" width="200" height="200"/></defs><g opacity="1" transform="translate(0 0)  rotate(0 100 100)"><mask id="bg-mask-0" fill="white"><use xlink:href="#path_0"/></mask><g mask="url(#bg-mask-0)"><path id="arrow" style="fill:#CCCCCC" transform="translate(35.21963688171376 44.356081611360985)  rotate(-90 66.78036311828623 52.999999999999986)" opacity="0" d=""/><path id="arrow" style="stroke: currentColor; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(35.21963688171376 44.356081611360985)  rotate(-90 66.78036311828623 52.999999999999986)" d="M133.56,105.98L66.78,0L0,106 "/></g></g></svg>
+            <svg v-show="playing" @click="pauseMusic()" class="control-icon" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="20" height="20" viewBox="0 0 200 200" fill="none"><defs><rect id="path_0" x="0" y="0" width="200" height="200"/></defs><g opacity="1" transform="translate(0 0)  rotate(0 100 100)"><mask id="bg-mask-0" fill="white"><use xlink:href="#path_0"/></mask><g mask="url(#bg-mask-0)"><path id="line2" style="fill:#000000" transform="translate(152 24)  rotate(0 0.0005 76)" opacity="1" d=""/><path id="line2" style="stroke: currentColor; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(152 24)  rotate(0 0.0005 76)" d="M0,0L0,152 "/><path id="line1" style="fill:#000000" transform="translate(48 24)  rotate(0 0.0005 76)" opacity="1" d=""/><path id="line1" style="stroke: currentColor; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(48 24)  rotate(0 0.0005 76)" d="M0,0L0,152 "/></g></g></svg>
+            <svg v-show="!playing" @click="startMusic()" class="control-icon" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="20" height="20" viewBox="0 0 200 200" fill="none"><defs><rect id="path_0" x="0" y="0" width="200" height="200"/></defs><g opacity="1" transform="translate(0 0)  rotate(0 100 100)"><mask id="bg-mask-0" fill="white"><use xlink:href="#path_0"/></mask><g mask="url(#bg-mask-0)"><path id="三角形 1" fill-rule="evenodd" style="fill:#CCCCCC" transform="translate(0 12)  rotate(90 88 88)" opacity="0" d="M11.79,132L164.21,132L88,0L11.79,132Z "/><path id="三角形 1" style="stroke: currentColor; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(0 12)  rotate(90 88 88)" d="M11.79,132L164.21,132L88,0L11.79,132Z "/></g></g></svg>
+            <svg @click="playNext()" xmlns="http://www.w3.org/2000/svg" class="control-icon" xmlns:xlink="http://www.w3.org/1999/xlink" width="20" height="20" viewBox="0 0 200 200" fill="none"><defs><rect id="path_0" x="0" y="0" width="200" height="200"/></defs><g opacity="1" transform="translate(0 0)  rotate(0 100 100)"><mask id="bg-mask-0" fill="white"><use xlink:href="#path_0"/></mask><g mask="url(#bg-mask-0)"><path id="arrow" style="fill:#CCCCCC" transform="translate(35.21963688171376 44.356081611360985)  rotate(90 66.78036311828623 52.999999999999986)" opacity="0" d=""/><path id="arrow" style="stroke: currentColor; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(35.21963688171376 44.356081611360985)  rotate(90 66.78036311828623 52.999999999999986)" d="M133.56,105.98L66.78,0L0,106 "/></g></g></svg>
         </div>
         <div class="music-volume">
             <div class="volume-container">
@@ -189,13 +200,13 @@
         <div class="music-other">
             <!-- 喜欢/收藏：歌曲与电台分别处理 -->
             <template v-if="!isDjMode">
-            <svg t="1668786418014" v-if="Array.isArray(userStore.likelist) && currentSong && !isCurrentLocalSong && !isDjMode && !isCurrentSirenSong" @click="likeSong(true)" v-show="!checkIsLike(songId)" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="1417" width="200" height="200"><path d="M736.603 35.674c-87.909 0-169.647 44.1-223.447 116.819C459.387 79.756 377.665 35.674 289.708 35.674c-158.47 0-287.397 140.958-287.397 314.233 0 103.371 46.177 175.887 83.296 234.151 107.88 169.236 379.126 379.846 390.616 388.725 11.068 8.557 24.007 12.837 36.917 12.837 12.939 0 25.861-4.28 36.917-12.837 11.503-8.879 282.765-219.488 390.614-388.725C977.808 525.793 1024 453.277 1024 349.907 1023.999 176.632 895.071 35.674 736.603 35.674zM888.196 544.065C785.507 705.207 513.139 915.679 513.139 915.679S240.802 705.206 138.081 544.065c-37.884-59.491-71.805-116.034-71.805-194.158 0-134.904 100.025-244.309 223.433-244.309 91.199 0 169.491 59.833 204.225 145.493l0-0.427 0.094 0c2.588 8.933 10.132 15.445 19.113 15.445 9.013 0 16.558-6.512 19.128-15.445l0.265 0c34.813-85.404 112.996-145.066 204.07-145.066 123.378 0 223.433 109.405 223.433 244.309C960.035 428.031 926.111 484.574 888.196 544.065z" p-id="1418"></path></svg>
-            <svg t="1668786896650" v-if="Array.isArray(userStore.likelist) && currentSong && !isCurrentLocalSong && !isDjMode && !isCurrentSirenSong" @click="likeSong(false)" v-show="checkIsLike(songId)" class="icon" viewBox="0 0 1025 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="9975" width="200" height="200"><path d="M1024.549 360.609c0-170.492-133.815-309.265-298.055-309.265-81.129 0-157.91 34.998-213.344 94.701-55.509-59.702-132.367-94.701-213.344-94.701C135.49 51.344 1.751 190.041 1.751 360.609c0 5.719 0.534 10.827 0.991 15.021-0.076 1.373-0.152 2.745-0.152 4.194 0 30.193 7.319 63.361 21.73 98.59 0.458 1.295 0.915 2.516 1.449 3.657 90.812 217.844 440.412 468.474 455.279 479.985 9.227 7.092 20.205 10.6 31.263 10.6 11.209 0 22.266-3.659 31.566-10.903 12.733-9.911 310.941-224.551 429.279-427.603 4.498-6.861 7.854-13.494 10.828-19.215 0.914-1.829 1.753-3.658 2.744-5.413l0.382-0.839c0.382-0.686 0.839-1.449 1.296-2.059 7.091-13.802 12.732-26.611 17.232-39.116 12.274-32.177 18.3-60.847 18.3-87.61 0-2.058-0.077-3.888-0.229-5.414C1024.093 370.979 1024.549 366.251 1024.549 360.609z" p-id="9976" fill="#E5404F"></path></svg>
+            <svg t="1668786418014" v-if="canShowSongLike" @click="likeSong(true)" v-show="!checkIsLike(songId)" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="1417" width="200" height="200"><path d="M736.603 35.674c-87.909 0-169.647 44.1-223.447 116.819C459.387 79.756 377.665 35.674 289.708 35.674c-158.47 0-287.397 140.958-287.397 314.233 0 103.371 46.177 175.887 83.296 234.151 107.88 169.236 379.126 379.846 390.616 388.725 11.068 8.557 24.007 12.837 36.917 12.837 12.939 0 25.861-4.28 36.917-12.837 11.503-8.879 282.765-219.488 390.614-388.725C977.808 525.793 1024 453.277 1024 349.907 1023.999 176.632 895.071 35.674 736.603 35.674zM888.196 544.065C785.507 705.207 513.139 915.679 513.139 915.679S240.802 705.206 138.081 544.065c-37.884-59.491-71.805-116.034-71.805-194.158 0-134.904 100.025-244.309 223.433-244.309 91.199 0 169.491 59.833 204.225 145.493l0-0.427 0.094 0c2.588 8.933 10.132 15.445 19.113 15.445 9.013 0 16.558-6.512 19.128-15.445l0.265 0c34.813-85.404 112.996-145.066 204.07-145.066 123.378 0 223.433 109.405 223.433 244.309C960.035 428.031 926.111 484.574 888.196 544.065z" p-id="1418"></path></svg>
+            <svg t="1668786896650" v-if="canShowSongLike" @click="likeSong(false)" v-show="checkIsLike(songId)" class="icon" viewBox="0 0 1025 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="9975" width="200" height="200"><path d="M1024.549 360.609c0-170.492-133.815-309.265-298.055-309.265-81.129 0-157.91 34.998-213.344 94.701-55.509-59.702-132.367-94.701-213.344-94.701C135.49 51.344 1.751 190.041 1.751 360.609c0 5.719 0.534 10.827 0.991 15.021-0.076 1.373-0.152 2.745-0.152 4.194 0 30.193 7.319 63.361 21.73 98.59 0.458 1.295 0.915 2.516 1.449 3.657 90.812 217.844 440.412 468.474 455.279 479.985 9.227 7.092 20.205 10.6 31.263 10.6 11.209 0 22.266-3.659 31.566-10.903 12.733-9.911 310.941-224.551 429.279-427.603 4.498-6.861 7.854-13.494 10.828-19.215 0.914-1.829 1.753-3.658 2.744-5.413l0.382-0.839c0.382-0.686 0.839-1.449 1.296-2.059 7.091-13.802 12.732-26.611 17.232-39.116 12.274-32.177 18.3-60.847 18.3-87.61 0-2.058-0.077-3.888-0.229-5.414C1024.093 370.979 1024.549 366.251 1024.549 360.609z" p-id="9976" fill="#E5404F"></path></svg>
             </template>
             <template v-else>
               <!-- 电台收藏/取消收藏 -->
-              <svg t="1668786418014" v-if="Array.isArray(userStore.likelist)" @click="toggleDjSub(true)" v-show="!djSubed" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="1417" width="200" height="200"><path d="M736.603 35.674c-87.909 0-169.647 44.1-223.447 116.819C459.387 79.756 377.665 35.674 289.708 35.674c-158.47 0-287.397 140.958-287.397 314.233 0 103.371 46.177 175.887 83.296 234.151 107.88 169.236 379.126 379.846 390.616 388.725 11.068 8.557 24.007 12.837 36.917 12.837 12.939 0 25.861-4.28 36.917-12.837 11.503-8.879 282.765-219.488 390.614-388.725C977.808 525.793 1024 453.277 1024 349.907 1023.999 176.632 895.071 35.674 736.603 35.674zM888.196 544.065C785.507 705.207 513.139 915.679 513.139 915.679S240.802 705.206 138.081 544.065c-37.884-59.491-71.805-116.034-71.805-194.158 0-134.904 100.025-244.309 223.433-244.309 91.199 0 169.491 59.833 204.225 145.493l0-0.427 0.094 0c2.588 8.933 10.132 15.445 19.113 15.445 9.013 0 16.558-6.512 19.128-15.445l0.265 0c34.813-85.404 112.996-145.066 204.07-145.066 123.378 0 223.433 109.405 223.433 244.309C960.035 428.031 926.111 484.574 888.196 544.065z" p-id="1418"></path></svg>
-              <svg t="1668786896650" v-if="Array.isArray(userStore.likelist)" @click="toggleDjSub(false)" v-show="djSubed" class="icon" viewBox="0 0 1025 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="9975" width="200" height="200"><path d="M1024.549 360.609c0-170.492-133.815-309.265-298.055-309.265-81.129 0-157.91 34.998-213.344 94.701-55.509-59.702-132.367-94.701-213.344-94.701C135.49 51.344 1.751 190.041 1.751 360.609c0 5.719 0.534 10.827 0.991 15.021-0.076 1.373-0.152 2.745-0.152 4.194 0 30.193 7.319 63.361 21.73 98.59 0.458 1.295 0.915 2.516 1.449 3.657 90.812 217.844 440.412 468.474 455.279 479.985 9.227 7.092 20.205 10.6 31.263 10.6 11.209 0 22.266-3.659 31.566-10.903 12.733-9.911 310.941-224.551 429.279-427.603 4.498-6.861 7.854-13.494 10.828-19.215 0.914-1.829 1.753-3.658 2.744-5.413l0.382-0.839c0.382-0.686 0.839-1.449 1.296-2.059 7.091-13.802 12.732-26.611 17.232-39.116 12.274-32.177 18.3-60.847 18.3-87.61 0-2.058-0.077-3.888-0.229-5.414C1024.093 370.979 1024.549 366.251 1024.549 360.609z" p-id="9975" fill="#E5404F"></path></svg>
+              <svg t="1668786418014" v-if="hasUserSession" @click="toggleDjSub(true)" v-show="!djSubed" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="1417" width="200" height="200"><path d="M736.603 35.674c-87.909 0-169.647 44.1-223.447 116.819C459.387 79.756 377.665 35.674 289.708 35.674c-158.47 0-287.397 140.958-287.397 314.233 0 103.371 46.177 175.887 83.296 234.151 107.88 169.236 379.126 379.846 390.616 388.725 11.068 8.557 24.007 12.837 36.917 12.837 12.939 0 25.861-4.28 36.917-12.837 11.503-8.879 282.765-219.488 390.614-388.725C977.808 525.793 1024 453.277 1024 349.907 1023.999 176.632 895.071 35.674 736.603 35.674zM888.196 544.065C785.507 705.207 513.139 915.679 513.139 915.679S240.802 705.206 138.081 544.065c-37.884-59.491-71.805-116.034-71.805-194.158 0-134.904 100.025-244.309 223.433-244.309 91.199 0 169.491 59.833 204.225 145.493l0-0.427 0.094 0c2.588 8.933 10.132 15.445 19.113 15.445 9.013 0 16.558-6.512 19.128-15.445l0.265 0c34.813-85.404 112.996-145.066 204.07-145.066 123.378 0 223.433 109.405 223.433 244.309C960.035 428.031 926.111 484.574 888.196 544.065z" p-id="1418"></path></svg>
+              <svg t="1668786896650" v-if="hasUserSession" @click="toggleDjSub(false)" v-show="djSubed" class="icon" viewBox="0 0 1025 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="9975" width="200" height="200"><path d="M1024.549 360.609c0-170.492-133.815-309.265-298.055-309.265-81.129 0-157.91 34.998-213.344 94.701-55.509-59.702-132.367-94.701-213.344-94.701C135.49 51.344 1.751 190.041 1.751 360.609c0 5.719 0.534 10.827 0.991 15.021-0.076 1.373-0.152 2.745-0.152 4.194 0 30.193 7.319 63.361 21.73 98.59 0.458 1.295 0.915 2.516 1.449 3.657 90.812 217.844 440.412 468.474 455.279 479.985 9.227 7.092 20.205 10.6 31.263 10.6 11.209 0 22.266-3.659 31.566-10.903 12.733-9.911 310.941-224.551 429.279-427.603 4.498-6.861 7.854-13.494 10.828-19.215 0.914-1.829 1.753-3.658 2.744-5.413l0.382-0.839c0.382-0.686 0.839-1.449 1.296-2.059 7.091-13.802 12.732-26.611 17.232-39.116 12.274-32.177 18.3-60.847 18.3-87.61 0-2.058-0.077-3.888-0.229-5.414C1024.093 370.979 1024.549 366.251 1024.549 360.609z" p-id="9975" fill="#E5404F"></path></svg>
             </template>
             <svg v-show="!isDjMode && currentSong && !isCurrentLocalSong && !isCurrentSirenSong" @click="addToPlaylist()" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" width="200" height="200">
                 <path d="M512 85.333333c235.648 0 426.666667 191.018667 426.666667 426.666667s-191.018667 426.666667-426.666667 426.666667S85.333333 747.648 85.333333 512 276.352 85.333333 512 85.333333z m0 85.333334a341.333333 341.333333 0 1 0 0 682.666666 341.333333 341.333333 0 0 0 0-682.666666z m0 128a42.666667 42.666667 0 0 1 42.666667 42.666666v128H682.666667a42.666667 42.666667 0 0 1 0 85.333334H554.666667v128a42.666667 42.666667 0 0 1-85.333334 0V554.666667H341.333333a42.666667 42.666667 0 0 1 0-85.333334h128V341.333333a42.666667 42.666667 0 0 1 42.666667-42.666666z" fill="#000000"></path>
@@ -212,7 +223,7 @@
             <svg t="1668787624519" @click="playlistWidgetShow = !playlistWidgetShow" v-show="!isInFMMode" class="playlist-icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="15157" width="200" height="200"><path d="M85.333333 768h426.666667v85.333333H85.333333v-85.333333z m0-298.666667h597.333334v85.333334H85.333333v-85.333334z m0-298.666666h853.333334v85.333333H85.333333V170.666667z m725.333334 476.586666V384h213.333333v85.333333h-128v298.666667a128 128 0 1 1-85.333333-120.746667zM768 810.666667a42.666667 42.666667 0 1 0 0-85.333334 42.666667 42.666667 0 0 0 0 85.333334z" p-id="15158"></path></svg>
         </div>
     </div>
-    <PlayList class="playlist-widget" :class="{'playlist-widget-open': playlistWidgetShow}"></PlayList>
+    <PlayList v-if="playlistWidgetLoaded" class="playlist-widget" :class="{'playlist-widget-open': playlistWidgetShow}"></PlayList>
     <div class="widget-back"></div>
   </div>
 </template>
@@ -343,8 +354,13 @@
         display: flex;
         flex-direction: row;
         align-items: center;
+        width: 476Px;
+        flex: 0 0 476Px;
         .music-control{
             padding: 0 18Px;
+            width: 126Px;
+            box-sizing: border-box;
+            flex: 0 0 126Px;
             display: flex;
             flex-direction: row;
             align-items: center;
@@ -365,6 +381,7 @@
         }
         .music-volume{
             width: 120Px;
+            flex: 0 0 120Px;
             .volume-container{
                 width: 100%;
                 height: 7Px;
@@ -407,16 +424,17 @@
             }
         }
         .music-other{
-            margin-left: 30Px;
-            margin-right: 30Px;
+            width: 230Px;
+            box-sizing: border-box;
+            flex: 0 0 230Px;
             display: flex;
             flex-direction: row;
             align-items: center;
+            justify-content: space-evenly;
             svg{
-                margin-right: 22Px;
                 width: 20Px;
                 height: 20Px;
-                flex-shrink: 0;
+                flex: 0 0 20Px;
                 transition: 0.2s;
                 &:hover{
                     cursor: pointer;

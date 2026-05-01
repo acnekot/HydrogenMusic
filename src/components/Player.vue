@@ -1,11 +1,10 @@
 <script setup>
-import { computed, ref, onMounted, onUnmounted, watch } from 'vue';
+import { computed, defineAsyncComponent, ref, onMounted, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { songTime2 } from '../utils/player';
+import { songTime2 } from '../utils/time';
 import VueSlider from 'vue-slider-component';
-import PlayList from './PlayList.vue';
 import OverflowMarquee from './base/OverflowMarquee.vue';
-import { startMusic, pauseMusic, playLast, playNext, changeProgress, changePlayMode, likeSong } from '../utils/player';
+import { startMusic, pauseMusic, playLast, playNext, changeProgress, changePlayMode, likeSong } from '../utils/player/lazy';
 import { getDjDetail, subDj } from '../api/dj';
 import { useUserStore } from '../store/userStore';
 import { usePlayerStore } from '../store/playerStore';
@@ -13,7 +12,11 @@ import { useLocalStore } from '../store/localStore';
 import { useOtherStore } from '../store/otherStore';
 import { storeToRefs } from 'pinia';
 import { toggleDesktopLyric } from '../utils/desktopLyric';
+import { getSongCoverUrl, withCoverParam } from '../utils/coverBackdrop';
 import { getSongDisplayName } from '../utils/songName';
+import { getIndexedSong } from '../utils/songList';
+import { useStableImageSource } from '../composables/useStableImageSource';
+const PlayList = defineAsyncComponent(() => import('./PlayList.vue'));
 
 // 定义 props 和 emit
 const props = defineProps({
@@ -92,6 +95,7 @@ const {
     coverBlur,
     showSongTranslation,
 } = storeToRefs(playerStore);
+const playlistWidgetLoaded = ref(false);
 
 const safeSliderRange = computed(() => {
     const currentTime = Number(time.value);
@@ -116,14 +120,22 @@ const sliderProgress = computed({
 });
 
 // 检查是否在FM模式
-const isInFMMode = computed(() => {
-    return listInfo.value && listInfo.value.type === 'personalfm';
-});
+const isInFMMode = computed(() => listInfo.value?.type === 'personalfm');
 
 // 是否为电台(DJ)模式
-const isDjMode = computed(() => listInfo.value && listInfo.value.type === 'dj');
-const isCurrentSirenSong = computed(() => songList.value?.[currentIndex.value]?.source === 'siren');
-const currentSongDisplayName = computed(() => getSongDisplayName(songList.value?.[currentIndex.value], '加载中...', showSongTranslation.value));
+const isDjMode = computed(() => listInfo.value?.type === 'dj');
+const currentSong = computed(() => getIndexedSong(songList.value, currentIndex.value));
+const currentSongArtists = computed(() => Array.isArray(currentSong.value?.ar) ? currentSong.value.ar : []);
+const isCurrentSirenSong = computed(() => currentSong.value?.source === 'siren');
+const currentSongDisplayName = computed(() => getSongDisplayName(currentSong.value, '加载中...', showSongTranslation.value));
+const showRemoteCurrentSong = computed(() => !!currentSong.value && currentSong.value.type !== 'local');
+const showOnlineCurrentSongActions = computed(() => !isDjMode.value && showRemoteCurrentSong.value && !isCurrentSirenSong.value);
+const showCommentPanelAction = computed(() => showRemoteCurrentSong.value && !isCurrentSirenSong.value);
+
+const currentSongCoverUrl = computed(() => {
+    return withCoverParam(getSongCoverUrl(currentSong.value), 1024);
+});
+const displayedRemoteCoverUrl = useStableImageSource(currentSongCoverUrl);
 
 // 当前电台订阅状态与rid
 const djSubed = ref(false);
@@ -143,6 +155,9 @@ const loadDjSubStatus = async () => {
 watch(djRid, () => {
     djSubed.value = false;
     if (djRid.value) loadDjSubStatus();
+});
+watch(playlistWidgetShow, shown => {
+    if (shown) playlistWidgetLoaded.value = true;
 });
 
 const checkIsLike = computed(() => id => {
@@ -168,8 +183,8 @@ const hasTransLyric = computed(() => lyricFlags.value.trans);
 const hasRomaLyric = computed(() => lyricFlags.value.roma);
 
 const toAlbum = () => {
-    const currentSong = songList.value?.[currentIndex.value];
-    if (!currentSong) return;
+    const song = currentSong.value;
+    if (!song) return;
     // 电台节目：打开“收藏-电台”的大右侧详情界面
     if (isDjMode.value) {
         const rid = (listInfo.value && listInfo.value.id) || null;
@@ -183,10 +198,10 @@ const toAlbum = () => {
         return;
     }
     // 普通歌曲：仍然跳转专辑
-    if (currentSong.type != 'local') {
-        const targetPath = currentSong.source === 'siren'
-            ? '/siren/album/' + currentSong.al.id
-            : '/mymusic/album/' + currentSong.al.id
+    if (song.type != 'local') {
+        const targetPath = song.source === 'siren'
+            ? '/siren/album/' + song.al.id
+            : '/mymusic/album/' + song.al.id
         router.push(targetPath);
         widgetState.value = true;
         lyricShow.value = false;
@@ -197,19 +212,19 @@ const toAlbum = () => {
 };
 
 const download = () => {
-    const currentSong = songList.value?.[currentIndex.value];
-    if (currentSong?.type != 'local') {
+    const song = currentSong.value;
+    if (song && song.type != 'local') {
         let list = [];
-        list.push(currentSong);
+        list.push(song);
         localStore.updateDownloadList(list);
     }
 };
 
 const checkArtist = artistId => {
-    const currentSong = songList.value?.[currentIndex.value];
+    const song = currentSong.value;
     // 电台模式下禁止点击作者
     if (isDjMode.value || isCurrentSirenSong.value || !artistId) return;
-    if (currentSong?.type != 'local') {
+    if (song && song.type != 'local') {
         router.push('/mymusic/artist/' + artistId);
         widgetState.value = true;
         lyricShow.value = false;
@@ -219,11 +234,11 @@ const checkArtist = artistId => {
     }
 };
 const toAddMusicVideo = () => {
-    const currentSong = songList.value?.[currentIndex.value];
-    if (currentSong) {
+    const song = currentSong.value;
+    if (song) {
         addMusicVideo.value = {
             id: songId.value,
-            name: getSongDisplayName(currentSong, '', showSongTranslation.value),
+            name: getSongDisplayName(song, '', showSongTranslation.value),
             dt: time.value,
         };
     }
@@ -233,9 +248,9 @@ const backToVideo = () => {
 };
 
 const addToPlaylist = () => {
-    const currentSong = songList.value?.[currentIndex.value];
-    if (currentSong && currentSong.type !== 'local' && currentSong.source !== 'siren') {
-        otherStore.selectedItem = currentSong;
+    const song = currentSong.value;
+    if (song && song.type !== 'local' && song.source !== 'siren') {
+        otherStore.selectedItem = song;
         otherStore.addPlaylistShow = true;
     }
 };
@@ -256,18 +271,16 @@ const toggleDjSub = async isSubscribe => {
     <div class="player-container">
         <div class="player">
             <div class="player-cover">
-                <div class="cover" :class="{ 'cover-change': playerChangeSong, 'back-Video': videoIsPlaying }" @click="backToVideo()">
-                    <!-- Force re-create <img> when song changes so old cover doesn't persist -->
+                <div class="cover" :class="{ 'back-Video': videoIsPlaying }" @click="backToVideo()">
                     <img
-                        v-if="songList?.[currentIndex]?.type != 'local'"
-                        :key="'remote-' + (songId || songList?.[currentIndex]?.id)"
-                        :src="songList?.[currentIndex]?.coverUrl || songList?.[currentIndex]?.al?.picUrl"
+                        v-if="showRemoteCurrentSong && displayedRemoteCoverUrl"
+                        :src="displayedRemoteCoverUrl"
                         alt=""
                     />
-                    <img v-else v-show="localBase64Img" :key="'local-' + (songId || songList?.[currentIndex]?.id)" :src="localBase64Img" alt="" />
+                    <img v-else-if="currentSong?.type === 'local' && localBase64Img" :key="'local-' + (songId || currentSong?.id)" :src="localBase64Img" alt="" />
                     <img
-                        v-if="songList?.[currentIndex]?.type == 'local' && !localBase64Img"
-                        :key="'local-default-' + (songId || songList?.[currentIndex]?.id)"
+                        v-else-if="currentSong?.type === 'local'"
+                        :key="'local-default-' + (songId || currentSong?.id)"
                         src="https://p3.music.126.net/UeTuwE7pvjBpypWLudqukA==/3132508627578625.jpg?param=140y140"
                         alt=""
                     />
@@ -295,9 +308,9 @@ const toggleDjSub = async isSubscribe => {
                                 @click="checkArtist(singer.id)"
                                 :class="['author', { disabled: isDjMode || isCurrentSirenSong }]"
                                 :style="{ color: videoIsPlaying || coverBlur ? 'var(--text)' : 'var(--muted-text)' }"
-                                v-for="(singer, index) in songList?.[currentIndex]?.ar || []"
+                                v-for="(singer, index) in currentSongArtists"
                             >
-                            {{ singer.name || '' }}{{ index == (songList?.[currentIndex]?.ar?.length || 0) - 1 ? '' : ' / ' }}
+                            {{ singer.name || '' }}{{ index == currentSongArtists.length - 1 ? '' : ' / ' }}
                         </span>
                     </div>
                 </div>
@@ -574,7 +587,7 @@ const toggleDjSub = async isSubscribe => {
                 </svg>
 
                 <!-- 喜欢/收藏：仅在线歌曲显示；本地与电台隐藏/分支另行处理 -->
-                <template v-if="!isDjMode && songList?.[currentIndex]?.type !== 'local' && !isCurrentSirenSong">
+                <template v-if="showOnlineCurrentSongActions">
                     <svg
                         t="1668786418014"
                         v-if="Array.isArray(userStore.likelist)"
@@ -655,7 +668,7 @@ const toggleDjSub = async isSubscribe => {
                 </template>
                 <!-- 下载：本地歌曲不显示 -->
                 <svg
-                    v-if="songList?.[currentIndex]?.type !== 'local'"
+                    v-if="showRemoteCurrentSong"
                     t="1669445939818"
                     @click="download()"
                     class="icon"
@@ -670,7 +683,7 @@ const toggleDjSub = async isSubscribe => {
                 </svg>
                 <!-- 添加到歌单：本地与电台均不显示 -->
                 <svg
-                    v-if="!isDjMode && songList?.[currentIndex]?.type !== 'local' && !isCurrentSirenSong"
+                    v-if="showOnlineCurrentSongActions"
                     @click="addToPlaylist()"
                     class="icon"
                     viewBox="0 0 1024 1024"
@@ -686,7 +699,7 @@ const toggleDjSub = async isSubscribe => {
                 </svg>
                 <!-- 显示专辑：本地歌曲不显示图标 -->
                 <svg
-                    v-if="songList?.[currentIndex]?.type !== 'local'"
+                    v-if="showRemoteCurrentSong"
                     t="1668785761323"
                     @click="toAlbum()"
                     class="icon"
@@ -789,7 +802,7 @@ const toggleDjSub = async isSubscribe => {
 
                 <!-- 歌词/评论切换按钮：本地歌曲隐藏评论按钮 -->
                 <svg
-                    v-if="songList?.[currentIndex]?.type !== 'local' && !isCurrentSirenSong"
+                    v-if="showCommentPanelAction"
                     @click="switchRightPanel(props.rightPanelMode === 0 ? 1 : 0)"
                     :class="{ 'comment-icon-active': props.rightPanelMode === 1, 'comment-icon-inactive': props.rightPanelMode === 0 }"
                     class="icon comment-icon"
@@ -825,7 +838,7 @@ const toggleDjSub = async isSubscribe => {
             </div>
         </div>
 
-        <PlayList class="playlist-widget-player" :class="{ 'playlist-widget-open': playlistWidgetShow }"></PlayList>
+        <PlayList v-if="playlistWidgetLoaded" class="playlist-widget-player" :class="{ 'playlist-widget-open': playlistWidgetShow }"></PlayList>
 
         <span class="border border1"></span>
         <span class="border border2"></span>
@@ -920,10 +933,6 @@ const toggleDjSub = async isSubscribe => {
                         }
                     }
                 }
-            }
-            .cover-change {
-                opacity: 0;
-                transform: scale(0.95);
             }
             .back-Video {
                 &:hover {

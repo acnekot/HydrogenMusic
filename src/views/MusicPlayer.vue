@@ -2,15 +2,18 @@
 import Player from '../components/Player.vue';
 import Lyric from '../components/Lyric.vue';
 import ProgramIntro from '../components/ProgramIntro.vue';
-import Comments from '../components/Comments.vue';
-import MusicVideo from '../components/MusicVideo.vue';
-import PlayerVideo from '../components/PlayerVideo.vue';
-import { ref, watch, nextTick, computed } from 'vue';
+import { ref, watch, nextTick, computed, defineAsyncComponent } from 'vue';
 import { usePlayerStore } from '../store/playerStore';
 import { getMusicComments } from '../api/song';
 import { getDjProgramComments } from '../api/dj';
 import { readCommentCountCache, writeCommentCountCache } from '../utils/commentCountCache';
+import { buildCoverBackdropCandidates } from '../utils/coverBackdrop';
+import { getIndexedSongOrFirst } from '../utils/songList';
+import { useStableImageSource } from '../composables/useStableImageSource';
 const playerStore = usePlayerStore();
+const Comments = defineAsyncComponent(() => import('../components/Comments.vue'));
+const MusicVideo = defineAsyncComponent(() => import('../components/MusicVideo.vue'));
+const PlayerVideo = defineAsyncComponent(() => import('../components/PlayerVideo.vue'));
 
 // 右侧内容切换状态 (0: 歌词, 1: 评论)
 const rightPanelMode = ref(0);
@@ -32,41 +35,11 @@ watch(rightPanelMode, (newMode, oldMode) => {
 // 当播放电台节目时，右侧显示电台简介而非歌词
 const isDj = computed(() => playerStore.listInfo && playerStore.listInfo.type === 'dj');
 
-const withCoverParam = (url, size = 512) => {
-    if (!url) return null;
-    if (url.startsWith('data:') || url.startsWith('blob:')) return url;
-    const hasQuery = url.includes('?');
-    const hasParam = /(?:\\?|&)param=\\d+y\\d+/.test(url);
-    if (hasParam) return url;
-    return `${url}${hasQuery ? '&' : '?'}param=${size}y${size}`;
-};
-
 const coverBgCandidateIndex = ref(0);
 
 const coverBgCandidates = computed(() => {
-    const list = playerStore.songList || [];
-    const idx = typeof playerStore.currentIndex === 'number' ? playerStore.currentIndex : 0;
-    const song = list[idx] || null;
-    if (!song) return [];
-    if (song.type === 'local') return playerStore.localBase64Img ? [playerStore.localBase64Img] : [];
-
-    const candidates = [];
-    const pushCandidate = url => {
-        const normalizedUrl = typeof url === 'string' ? url.trim() : '';
-        if (!normalizedUrl) return;
-
-        const sizedUrl = withCoverParam(normalizedUrl, 512);
-        if (sizedUrl && !candidates.includes(sizedUrl)) candidates.push(sizedUrl);
-        if (sizedUrl !== normalizedUrl && !candidates.includes(normalizedUrl)) candidates.push(normalizedUrl);
-    };
-
-    pushCandidate(song.blurPicUrl);
-    pushCandidate(song.coverDeUrl);
-    pushCandidate(song.coverUrl);
-    pushCandidate(song.al?.picUrl);
-    pushCandidate(song.img1v1Url);
-
-    return candidates;
+    const song = getIndexedSongOrFirst(playerStore.songList, playerStore.currentIndex);
+    return buildCoverBackdropCandidates(song, playerStore.localBase64Img);
 });
 
 watch(
@@ -77,27 +50,21 @@ watch(
     { immediate: true }
 );
 
-const coverBgUrl = computed(() => {
-    return coverBgCandidates.value[coverBgCandidateIndex.value] || null;
-});
+const coverBgUrl = computed(() => coverBgCandidates.value[coverBgCandidateIndex.value] || null);
+const displayedCoverBgUrl = useStableImageSource(coverBgUrl);
 
 const handleCoverBgError = () => {
-    if (coverBgCandidateIndex.value >= coverBgCandidates.value.length - 1) {
-        coverBgCandidateIndex.value = coverBgCandidates.value.length;
-        return;
-    }
-    coverBgCandidateIndex.value += 1;
+    coverBgCandidateIndex.value = Math.min(
+        coverBgCandidateIndex.value + 1,
+        coverBgCandidates.value.length
+    );
 };
 
-const showCoverBackdrop = computed(() => {
-    return !!playerStore.coverBlur && !!coverBgUrl.value && !playerStore.videoIsPlaying;
-});
+const showCoverBackdrop = computed(() => !!playerStore.coverBlur && !!displayedCoverBgUrl.value && !playerStore.videoIsPlaying);
 
 // 当切到本地歌曲时，若右侧是评论区则自动切回歌词，避免无按钮无法关闭
 const currentTrack = computed(() => {
-    const list = playerStore.songList || [];
-    const idx = typeof playerStore.currentIndex === 'number' ? playerStore.currentIndex : 0;
-    return list[idx] || null;
+    return getIndexedSongOrFirst(playerStore.songList, playerStore.currentIndex);
 });
 
 const isCurrentSirenSong = computed(() => currentTrack.value?.source === 'siren');
@@ -275,10 +242,9 @@ const customBgStyle = computed(() => {
                 :class="{ 'back-drop-siren': isCurrentSirenSong }"
             >
                 <img
-                    v-if="coverBgUrl"
-                    :key="coverBgUrl"
+                    v-if="displayedCoverBgUrl"
                     class="back-drop-image"
-                    :src="coverBgUrl"
+                    :src="displayedCoverBgUrl"
                     alt=""
                     aria-hidden="true"
                     referrerpolicy="no-referrer"

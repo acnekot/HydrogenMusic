@@ -1,9 +1,11 @@
 <script setup>
 import { ref, watch, onMounted, onUnmounted, nextTick, computed, reactive } from 'vue';
-import { changeProgress, musicVideoCheck } from '../utils/player';
+import { changeProgress, musicVideoCheck } from '../utils/player/lazy';
+import { getPlaybackSnapshot, PLAYBACK_TICK_FAST_INTERVAL_MS, subscribePlaybackTick } from '../utils/player/playbackTicker';
 import { usePlayerStore } from '../store/playerStore';
 import { storeToRefs } from 'pinia';
-import { syncLyricIndexForSeek } from '../composables/usePlayerRuntime';
+import { LYRIC_INDEX_SYNC_BIAS_SEC, syncLyricIndexForSeek } from '../composables/usePlayerRuntime';
+import { getIndexedSong } from '../utils/songList';
 import { getLyricVisualizerAudioEnv } from '../utils/lyricVisualizerAudio';
 
 const playerStore = usePlayerStore();
@@ -13,7 +15,6 @@ const {
     lyricsObjArr,
     songList,
     currentIndex,
-    currentMusic,
     widgetState,
     lyricShow,
     lyricEle,
@@ -41,6 +42,7 @@ const {
     lyricVisualizerRadialCoreSize,
     lyricFollowPosition,
     videoIsPlaying,
+    currentMusic,
 } = storeToRefs(playerStore);
 
 const audioEnv = getLyricVisualizerAudioEnv();
@@ -189,32 +191,7 @@ const visualizerRadialCoreSizeValue = computed(() => {
 });
 const visualizerRadialCoreSizeRatio = computed(() => visualizerRadialCoreSizeValue.value / 100);
 
-const visualizerCanvasStyle = computed(() => {
-    const isRadial = visualizerStyleValue.value === 'radial';
-    if (isRadial) {
-        return {
-            width: 'calc(100% - 3vh)',
-            height: 'calc(100% - 3vh)',
-            top: '50%',
-            left: '50%',
-            right: 'auto',
-            bottom: 'auto',
-            transform: 'translate(-50%, -50%)',
-        };
-    }
-    const height = visualizerCanvasHeightPx.value + 'px';
-    const base = { height, top: 'auto' };
-    if (shouldShowVisualizerInLyrics.value || shouldShowVisualizerInPlaceholder.value) {
-        return { ...base, width: 'calc(100% - 3vh)', left: '50%', right: 'auto', bottom: '1.5vh', transform: 'translateX(-50%)' };
-    }
-    return { ...base, width: '100%', left: '0', right: '0', bottom: '1.5vh', transform: 'none' };
-});
-
-const shouldShowVisualizerInLyrics = computed(() => lyricVisualizer.value && lyricAreaVisible.value);
-const shouldShowVisualizerInPlaceholder = computed(() => lyricVisualizer.value && !lyricAreaVisible.value);
-const shouldShowVisualizer = computed(
-    () => shouldShowVisualizerInLyrics.value || shouldShowVisualizerInPlaceholder.value
-);
+// Note: shouldShowVisualizerInLyrics/shouldShowVisualizer/visualizerCanvasStyle are defined after showLyricArea below
 
 let analyserDataArray = null;
 let canvasCtx = null;
@@ -224,15 +201,13 @@ let resizeHandler = null;
 let resizeTarget = null;
 let visualizerBarLevels = null;
 let visualizerPauseState = false;
-let visualizerLastFrameTime = 0; // 上一帧的 performance.now()，用于帧时间补偿
-// 缓存画布显示尺寸，避免每帧读取 DOM clientWidth/clientHeight 触发强制布局
+let visualizerLastFrameTime = 0;
 let cachedCanvasDisplayWidth = 0;
 let cachedCanvasDisplayHeight = 0;
 
 const syncAnalyserConfig = () => {
     const analyser = audioEnv.analyser;
     if (!analyser) return;
-    // fftSize 512 → 每帧约 11ms 音频数据，响应更紧跟节拍
     const fftSize = 512;
     if (analyser.fftSize !== fftSize) {
         analyser.fftSize = fftSize;
@@ -240,7 +215,6 @@ const syncAnalyserConfig = () => {
     } else if (!analyserDataArray || analyserDataArray.length !== analyser.frequencyBinCount) {
         analyserDataArray = new Uint8Array(analyser.frequencyBinCount);
     }
-    // smoothingTimeConstant 降低到 0.5，减少内置平滑带来的延迟
     analyser.smoothingTimeConstant = visualizerSmoothing.value;
 };
 
@@ -263,9 +237,6 @@ const updateVisualizerLevels = (size, resolveTarget, deltaMultiplier = 1) => {
     const levels = ensureVisualizerLevels(size);
     if (!levels) return 0;
     let peak = 0;
-
-    // 基准 attack/release 按 60fps 设计；帧时间补偿让慢帧追更多、快帧追更少
-    // 公式：1 - (1 - rate)^(deltaMultiplier)，在低帧率下等效于多步累加
     const attack = 1 - Math.pow(1 - 0.55, deltaMultiplier);
     const release = 1 - Math.pow(1 - 0.1, deltaMultiplier);
     for (let index = 0; index < size; index++) {
@@ -336,7 +307,6 @@ const updateVisualizerCanvasSize = () => {
     if (typeof canvasCtx.resetTransform === 'function') canvasCtx.resetTransform();
     else canvasCtx.setTransform(1, 0, 0, 1, 0, 0);
     canvasCtx.scale(dpr, dpr);
-    // 缓存显示尺寸，供 renderVisualizerFrame 热路径使用
     cachedCanvasDisplayWidth = displayWidth;
     cachedCanvasDisplayHeight = displayHeight;
 };
@@ -344,7 +314,7 @@ const updateVisualizerCanvasSize = () => {
 const ensureVisualizerSizeTracking = () => {
     updateVisualizerCanvasSize();
     const target =
-        (lyricAreaVisible.value && lyricScroll.value) || lyricVisualizerCanvas.value?.parentElement || null;
+        (showLyricArea.value && lyricScroll.value) || lyricVisualizerCanvas.value?.parentElement || null;
     if (typeof ResizeObserver !== 'undefined') {
         if (!target) return;
         if (!resizeObserver) {
@@ -356,10 +326,7 @@ const ensureVisualizerSizeTracking = () => {
                     if (contentRect) {
                         const width = Math.max(0, Math.round(contentRect.width));
                         const height = Math.max(0, Math.round(contentRect.height));
-                        if (
-                            visualizerContainerSize.width !== width ||
-                            visualizerContainerSize.height !== height
-                        ) {
+                        if (visualizerContainerSize.width !== width || visualizerContainerSize.height !== height) {
                             visualizerContainerSize.width = width;
                             visualizerContainerSize.height = height;
                         }
@@ -463,14 +430,11 @@ const setupVisualizer = async () => {
 
 const renderVisualizerFrame = (now = performance.now()) => {
     if (!shouldShowVisualizer.value || !canvasCtx || !lyricVisualizerCanvas.value) return false;
-    // 使用缓存尺寸，避免每帧读 DOM clientWidth/clientHeight 触发强制布局
     const width = cachedCanvasDisplayWidth;
     const height = cachedCanvasDisplayHeight;
     if (!width || !height) return true;
 
-    // 帧时间补偿：以 16.67ms（60fps）为基准，慢帧追更多、快帧追更少
     const rawDelta = visualizerLastFrameTime > 0 ? now - visualizerLastFrameTime : 16.67;
-    // 限制最大补偿倍率为 3（避免页面切回/帧跳跃时过度追赶）
     const deltaMultiplier = Math.min(rawDelta / 16.67, 3);
     visualizerLastFrameTime = now;
 
@@ -479,15 +443,12 @@ const renderVisualizerFrame = (now = performance.now()) => {
 
     const analyser = audioEnv.analyser;
     if (analyser) {
-        // 暂停时把 analyser 自身的平滑关掉，防止 AudioContext suspend/resume 时
-        // 内部缓冲残留值在恢复后混入新数据，产生"卡两下"的视觉跳变
         analyser.smoothingTimeConstant = paused ? 0 : visualizerSmoothing.value;
     }
     if (!paused && analyser && analyserDataArray) {
         try { analyser.getByteFrequencyData(analyserDataArray); } catch (_) {}
     }
 
-    // 从响应式对象中提取当前帧所需的值，避免在热路径中反复触发 Vue 依赖追踪
     const { r, g, b } = visualizerColorRGB.value;
     const opacityRatio = visualizerOpacityRatio.value;
     const freqMin = visualizerFrequencyMinValue.value;
@@ -513,8 +474,6 @@ const renderVisualizerFrame = (now = performance.now()) => {
     const levels = ensureVisualizerLevels(barCount);
     if (!levels) return false;
 
-    // 暂停时 target 强制为 0，播放时从 analyser 读数据
-    // 两种状态共用同一套 attack/release 平滑逻辑，过渡不会突变
     const peak = updateVisualizerLevels(
         barCount,
         paused
@@ -530,14 +489,12 @@ const renderVisualizerFrame = (now = performance.now()) => {
 
     canvasCtx.clearRect(0, 0, width, height);
 
-    // 当所有频谱条完全衰减至 0 时跳过绘制
     if (peak < 0.002) return true;
 
     const barWidth = width / barCount;
     const innerWidth = barWidth * Math.min(Math.max(barWidthRatio, 0.01), 1);
     const offset = (barWidth - innerWidth) / 2;
 
-    // 仅在 alpha 不同时更新 fillStyle，减少字符串分配
     let lastAlpha = -1;
     for (let i = 0; i < barCount; i++) {
         const value = levels[i] ?? 0;
@@ -561,7 +518,7 @@ const renderVisualizerFrame = (now = performance.now()) => {
 const startVisualizerLoop = ({ force = false } = {}) => {
     if (!shouldShowVisualizer.value || !lyricVisualizerCanvas.value || !canvasCtx) return;
     updateVisualizerCanvasSize();
-    visualizerLastFrameTime = 0; // 重置帧时间，防止第一帧 delta 过大
+    visualizerLastFrameTime = 0;
     if (animationFrameId) {
         if (!force) return;
         cancelAnimationFrame(animationFrameId);
@@ -610,10 +567,12 @@ const interludeAnimation = ref(false);
 const interludeRemainingTime = ref(null);
 // 当从有间奏的行切换到下一行时，立即折叠上一行的间奏，避免其收起动画影响高度测量
 const interludeFastClose = ref(false);
-let interludeInTimer = null;
 let interludeOutTimer = null;
+let interludeExitStartTimer = null;
+let stopInterludeProgressTicker = null;
 // 在“上一句预计结束”时再启动间奏的延迟定时器（启发式）
 let interludeDeferStartTimer = null;
+let interludeFastCloseResetTimer = null;
 let manualScrollReleaseTimer = null;
 let lyricWheelHandler = null;
 
@@ -621,6 +580,7 @@ let lyricRevealToken = 0;
 let lyricContentAnimation = null;
 let lyricScrollAnimationToken = 0;
 let lyricScrollAnimationTargetTop = null;
+let noDataLeavePromise;
 
 const LYRIC_FONT_READY_TIMEOUT_MS = 900;
 const LYRIC_LAYOUT_STABLE_SAMPLE_TARGET = 2;
@@ -632,9 +592,26 @@ const LYRIC_AUTO_SCROLL_EASING = 'cubic-bezier(0.4, 0, 0.12, 1)';
 const LYRIC_FOLLOW_TOP_OFFSET_RATIO = 0.38; // fallback，实际由 lyricFollowPosition 决定
 const LYRIC_FOLLOW_BOTTOM_GUTTER_PX = 180;
 const LYRIC_FOLLOW_VISIBLE_GUTTER_PX = 24;
+const DEFAULT_INTERLUDE_THRESHOLD_SEC = 13;
+const INTERLUDE_EXIT_ANIMATION_MS = 800;
+const INTERLUDE_EXIT_DOM_CLEANUP_MS = 900;
+const INTERLUDE_EXIT_ANIMATION_SEC = INTERLUDE_EXIT_ANIMATION_MS / 1000;
+const INTERLUDE_EXIT_RESERVE_SEC = INTERLUDE_EXIT_ANIMATION_SEC + LYRIC_INDEX_SYNC_BIAS_SEC;
+const NODATA_LEAVE_ANIMATION_MS = 220;
 
-// 切回歌词时抑制首帧闪烁（先隐藏，定位完成后再显示）
-const suppressLyricFlash = ref(true);
+function clearTimer(timer) {
+    if (timer) clearTimeout(timer);
+    return null;
+}
+
+function setInterludeDisplay({ index = interludeIndex.value, animation = interludeAnimation.value, remaining = interludeRemainingTime.value, fastClose = interludeFastClose.value } = {}) {
+    interludeIndex.value = index;
+    interludeAnimation.value = animation;
+    interludeRemainingTime.value = remaining;
+    interludeFastClose.value = fastClose;
+}
+
+// 切回歌词时先隐藏，定位完成后再显示，避免首帧闪烁
 const lyricAreaReady = ref(false);
 const lyricTopSpacerHeight = ref(260);
 const lyricBottomSpacerHeight = ref(LYRIC_FOLLOW_BOTTOM_GUTTER_PX);
@@ -642,10 +619,7 @@ const lyricBottomSpacerHeight = ref(LYRIC_FOLLOW_BOTTOM_GUTTER_PX);
 // 在高频同步中避免并发测量
 const syncingLayout = ref(false);
 const currentSong = computed(() => {
-    const list = Array.isArray(songList.value) ? songList.value : [];
-    const index = Number.isInteger(currentIndex.value) ? currentIndex.value : -1;
-
-    return index >= 0 && index < list.length ? list[index] : null;
+    return getIndexedSong(songList.value, currentIndex.value);
 });
 
 // —— 每首歌自适应的演唱时长估计模型 ——
@@ -670,6 +644,16 @@ function textUnitCount(text) {
     return han + hira + kata + kataExt + halfKata + words * 0.6;
 }
 
+function getInterludeThresholdSec() {
+    const rawValue = lyricInterludeTime.value;
+    if (rawValue === null || rawValue === undefined) return DEFAULT_INTERLUDE_THRESHOLD_SEC;
+    if (typeof rawValue === 'string' && rawValue.trim() === '') return DEFAULT_INTERLUDE_THRESHOLD_SEC;
+
+    const parsedValue = Number(rawValue);
+    if (!Number.isFinite(parsedValue)) return DEFAULT_INTERLUDE_THRESHOLD_SEC;
+    return Math.max(0, parsedValue);
+}
+
 function median(arr) {
     if (!arr.length) return NaN;
     const a = arr.slice().sort((x, y) => x - y);
@@ -682,7 +666,7 @@ function recomputeSongTimingModel() {
         const arr = Array.isArray(lyricsObjArr.value) ? lyricsObjArr.value : [];
         if (!arr.length) return;
         const candidates = [];
-        const thr = Number(lyricInterludeTime.value || 0) || 8; // 用户阈值或回退 8s
+        const thr = getInterludeThresholdSec();
         const upper = Math.min(Math.max(thr - 1, 4.5), 10); // 认为 <= upper 的行间隔主要是演唱
         const lower = 0.8; // 过滤极短的间隔
         for (let i = 0; i < arr.length - 1; i++) {
@@ -738,6 +722,10 @@ const withTimeout = async (promise, timeoutMs) => {
     await Promise.race([Promise.resolve(promise).catch(() => {}), sleep(timeoutMs)]);
 };
 
+function markNoDataLeave() {
+    noDataLeavePromise = sleep(NODATA_LEAVE_ANIMATION_MS);
+}
+
 function getLyricLineElements() {
     if (lyricScroll.value && typeof lyricScroll.value.querySelectorAll === 'function') {
         return lyricScroll.value.querySelectorAll('.lyric-line');
@@ -757,7 +745,6 @@ function isLyricRevealTokenActive(token) {
 function invalidateLyricReveal() {
     lyricRevealToken += 1;
     lyricAreaReady.value = false;
-    suppressLyricFlash.value = true;
 }
 
 async function waitForLyricFonts(token) {
@@ -802,13 +789,32 @@ const hasAnyLyricContent = computed(() => {
     return lyricsObjArr.value.some(item => !!(item && item.lyric && String(item.lyric).trim()))
 });
 const isLyricDataPending = computed(() => lyricsObjArr.value === null);
+const showMainLyricPanel = computed(() => !widgetState.value && lyricShow.value);
+const showOriginalLyric = computed(() => lyricType.value.includes('original'));
 const showLyricNoData = computed(() => {
-    if (lyricType.value.indexOf('original') == -1) return true;
+    if (!showMainLyricPanel.value) return false;
+    if (!showOriginalLyric.value) return true;
     if (isLyricDataPending.value) return false;
     return !hasLyricsList.value || !hasAnyLyricContent.value;
 });
 const showLyricArea = computed(() => {
-    return !!(hasLyricsList.value && hasAnyLyricContent.value && lyricShow.value && lyricType.value.indexOf('original') != -1);
+    return showMainLyricPanel.value && hasLyricsList.value && hasAnyLyricContent.value && showOriginalLyric.value;
+});
+
+// Visualizer computed props that depend on showLyricArea
+const shouldShowVisualizerInLyrics = computed(() => lyricVisualizer.value && showLyricArea.value);
+const shouldShowVisualizerInPlaceholder = computed(() => lyricVisualizer.value && !showLyricArea.value);
+const shouldShowVisualizer = computed(
+    () => shouldShowVisualizerInLyrics.value || shouldShowVisualizerInPlaceholder.value
+);
+
+const visualizerCanvasStyle = computed(() => {
+    const height = visualizerCanvasHeightPx.value + 'px';
+    const base = { height, top: 'auto' };
+    if (shouldShowVisualizerInLyrics.value || shouldShowVisualizerInPlaceholder.value) {
+        return { ...base, width: 'calc(100% - 3vh)', left: '50%', right: 'auto', bottom: '1.5vh', transform: 'translateX(-50%)' };
+    }
+    return { ...base, width: '100%', left: '0', right: '0', bottom: '1.5vh', transform: 'none' };
 });
 
 function getLyricScrollElement() {
@@ -881,9 +887,7 @@ function getLyricContentMetrics(index) {
 }
 
 function clearManualScrollReleaseTimer() {
-    if (!manualScrollReleaseTimer) return;
-    clearTimeout(manualScrollReleaseTimer);
-    manualScrollReleaseTimer = null;
+    manualScrollReleaseTimer = clearTimer(manualScrollReleaseTimer);
 }
 
 function getLyricContentVisualShiftY() {
@@ -1060,13 +1064,10 @@ function enterManualScrollMode() {
 
 const clearLycAnimation = flag => {
     if (flag) isLyricDelay.value = false;
-    const eles = lyricEle.value;
-    const hasBlur = lyricBlur.value;
-    const zeroSec = '0s';
-    for (let i = 0; i < eles.length; i++) {
-        eles[i].style.transitionDelay = zeroSec;
+    for (let i = 0; i < lyricEle.value.length; i++) {
+        lyricEle.value[i].style.transitionDelay = 0 + 's';
         // 当启用歌词模糊时，移除内联 filter 以便使用样式表控制
-        if (hasBlur) eles[i].firstChild.style.removeProperty('filter');
+        if (lyricBlur.value) lyricEle.value[i].firstChild.style.removeProperty('filter');
     }
     if (flag) {
         const forbidDelayTimer = setTimeout(() => {
@@ -1077,9 +1078,8 @@ const clearLycAnimation = flag => {
 };
 
 const setDefaultStyle = async () => {
-    lyricAreaReady.value = false;
     lycCurrentIndex.value = currentLyricIndex.value >= 0 ? currentLyricIndex.value : -1;
-    interludeAnimation.value = false;
+    setInterludeDisplay({ animation: false });
     lyricEle.value = getLyricLineElements();
     updateLyricScrollSpacers();
 
@@ -1126,12 +1126,12 @@ function isSameLyricLayoutSignature(prev, next) {
 // 监听歌词数组变化，重新设置样式
 watch(
     () => lyricsObjArr.value,
-    async newLyrics => {
+    newLyrics => {
         if (newLyrics && newLyrics.length > 0) {
             // 重新根据本首歌的行间隔校准演唱速率
             recomputeSongTimingModel();
             if (showLyricArea.value) {
-                await prepareLyricReveal();
+                void prepareLyricReveal();
             }
             return;
         }
@@ -1154,7 +1154,7 @@ const applyLyricLayout = async ({ waitForPaint = false, syncBehavior = null } = 
         await nextTick();
         lyricEle.value = getLyricLineElements();
         const resolvedSyncBehavior = syncBehavior ?? (
-            lyricAreaReady.value && !suppressLyricFlash.value && !isManualScrollActive.value ? 'smooth' : 'auto'
+            lyricAreaReady.value && !isManualScrollActive.value ? 'smooth' : 'auto'
         );
         syncLyricPosition({ behavior: resolvedSyncBehavior, force: true });
         if (waitForPaint) {
@@ -1196,33 +1196,6 @@ const prepareLyricReveal = async () => {
     if (!showLyricArea.value) return;
 
     const token = createLyricRevealToken();
-
-    // 快速通道：字体已加载完毕时直接显示，趁 fade 渐入动画（250ms）完成位置同步
-    // 避免"先隐藏再等待再显示"造成的 250-500ms 可感知延迟
-    const fontsAlreadyReady =
-        typeof document !== 'undefined' &&
-        document.fonts != null &&
-        document.fonts.status === 'loaded';
-
-    if (fontsAlreadyReady) {
-        suppressLyricFlash.value = false;
-        lyricAreaReady.value = true;
-        await nextTick();
-        if (!isLyricRevealTokenActive(token) || !showLyricArea.value) return;
-        // 快速位置同步（不调用 setDefaultStyle 以免其内部 lyricAreaReady=false 触发闪烁）
-        lycCurrentIndex.value = currentLyricIndex.value >= 0 ? currentLyricIndex.value : -1;
-        interludeAnimation.value = false;
-        lyricEle.value = getLyricLineElements();
-        updateLyricScrollSpacers();
-        await waitForLayoutCommit();
-        if (!isLyricRevealTokenActive(token) || !showLyricArea.value) return;
-        lyricEle.value = getLyricLineElements();
-        syncLyricPosition({ force: true });
-        return;
-    }
-
-    // 慢速通道：字体尚未加载（通常只在首次打开时触发），保留原有抑制闪烁逻辑
-    suppressLyricFlash.value = true;
     lyricAreaReady.value = false;
 
     await nextTick();
@@ -1237,28 +1210,70 @@ const prepareLyricReveal = async () => {
     await waitForStableLyricLayout(token);
     if (!isLyricRevealTokenActive(token) || !showLyricArea.value) return;
 
+    await noDataLeavePromise;
+    if (!isLyricRevealTokenActive(token) || !showLyricArea.value) return;
+
     lyricAreaReady.value = true;
-    suppressLyricFlash.value = false;
 };
 
 // —— 间奏等待动画——
+function clearInterludeDeferStartTimer() {
+    interludeDeferStartTimer = clearTimer(interludeDeferStartTimer);
+}
+
+function clearInterludeOutTimer() {
+    interludeOutTimer = clearTimer(interludeOutTimer);
+}
+
+function clearInterludeExitStartTimer() {
+    interludeExitStartTimer = clearTimer(interludeExitStartTimer);
+}
+
+function clearInterludeFastCloseResetTimer() {
+    interludeFastCloseResetTimer = clearTimer(interludeFastCloseResetTimer);
+}
+
+function scheduleInterludeFastCloseReset() {
+    clearInterludeFastCloseResetTimer();
+    interludeFastCloseResetTimer = setTimeout(() => {
+        setInterludeDisplay({ fastClose: false });
+        interludeFastCloseResetTimer = null;
+    }, 120);
+}
+
 function clearInterludeTimers() {
-    try { if (interludeInTimer) clearTimeout(interludeInTimer) } catch (_) {}
-    try { if (interludeOutTimer) clearTimeout(interludeOutTimer) } catch (_) {}
-    try { if (interludeDeferStartTimer) clearTimeout(interludeDeferStartTimer) } catch (_) {}
-    interludeInTimer = null;
-    interludeOutTimer = null;
-    interludeDeferStartTimer = null;
+    clearInterludeOutTimer();
+    clearInterludeExitStartTimer();
+    clearInterludeDeferStartTimer();
+}
+
+function resetInterludeState() {
+    clearInterludeTimers();
+    clearInterludeFastCloseResetTimer();
+    setInterludeDisplay({ index: null, animation: false, remaining: null, fastClose: false });
+}
+
+function closeInterludeSoon({ fastClose = false } = {}) {
+    clearInterludeDeferStartTimer();
+    clearInterludeExitStartTimer();
+    setInterludeDisplay({ animation: false, remaining: null });
+
+    if (interludeIndex.value == null) {
+        setInterludeDisplay({ fastClose: false });
+        return;
+    }
+
+    if (fastClose) setInterludeDisplay({ fastClose: true });
+    if (interludeOutTimer) return;
+
+    interludeOutTimer = setTimeout(() => {
+        setInterludeDisplay({ index: null, fastClose: false });
+        interludeOutTimer = null;
+    }, INTERLUDE_EXIT_DOM_CLEANUP_MS);
 }
 
 function getSafeSeek() {
-    try {
-        if (currentMusic.value && typeof currentMusic.value.seek === 'function') {
-            const s = currentMusic.value.seek();
-            if (typeof s === 'number' && !Number.isNaN(s)) return s;
-        }
-    } catch (_) {}
-    return typeof progress.value === 'number' ? progress.value : 0;
+    return getPlaybackSnapshot().seek;
 }
 
 // 辅助：查找“下一句有正文内容的歌词”的索引（忽略仅用于时长占位、正文为空的行）
@@ -1284,115 +1299,217 @@ function estimateLineDurationSec(text) {
 function estimateLineEndTimeSec(index, nextIndex) {
     const cur = lyricsObjArr.value?.[index];
     const nxt = lyricsObjArr.value?.[nextIndex];
-    if (!cur || typeof cur.time !== 'number') return NaN;
+    if (!cur) return NaN;
     const lineStart = Number(cur.time);
-    const nextStart = (nxt && typeof nxt.time === 'number') ? Number(nxt.time) : Infinity;
+    if (!Number.isFinite(lineStart)) return NaN;
+    const parsedNextStart = Number(nxt?.time);
+    const nextStart = Number.isFinite(parsedNextStart) ? parsedNextStart : Infinity;
     const estDur = estimateLineDurationSec(String(cur.lyric || ''));
     const estEnd = lineStart + estDur;
     return Math.min(estEnd, nextStart);
 }
 
+function getInterludeRemainingSeconds(nextLineTime, currentSeek, estEnd) {
+    const pureGapRemaining = nextLineTime - Math.max(currentSeek, estEnd);
+    return Math.max(0, Math.trunc(pureGapRemaining - INTERLUDE_EXIT_RESERVE_SEC));
+}
+
+function getInterludeExitStartTimeSec(nextLineTime) {
+    return nextLineTime - LYRIC_INDEX_SYNC_BIAS_SEC - INTERLUDE_EXIT_ANIMATION_SEC;
+}
+
+function shouldStartInterludeExit(nextLineTime, currentSeek) {
+    return currentSeek >= getInterludeExitStartTimeSec(nextLineTime);
+}
+
+function scheduleInterludeExit(nextLineTime, currentSeek, { force = false } = {}) {
+    if (!playing.value || !lyricShow.value) return;
+    if (interludeExitStartTimer && !force) return;
+
+    clearInterludeExitStartTimer();
+
+    const exitStartTime = getInterludeExitStartTimeSec(nextLineTime);
+    const delayMs = Math.max(0, Math.round((exitStartTime - currentSeek) * 1000));
+    if (delayMs === 0) {
+        closeInterludeSoon();
+        return;
+    }
+
+    interludeExitStartTimer = setTimeout(() => {
+        interludeExitStartTimer = null;
+        if (!playing.value || !lyricShow.value) return;
+        if (interludeIndex.value !== lycCurrentIndex.value) return;
+
+        const nextIdx = findNextContentIndex(lycCurrentIndex.value);
+        const scheduledNextLineTime = Number(lyricsObjArr.value?.[nextIdx]?.time ?? NaN);
+        if (!Number.isFinite(scheduledNextLineTime) || Math.abs(scheduledNextLineTime - nextLineTime) > 0.001) return;
+
+        const seekOnExit = getSafeSeek();
+        if (seekOnExit < exitStartTime - 0.05) {
+            scheduleInterludeExit(nextLineTime, seekOnExit, { force: true });
+            return;
+        }
+
+        closeInterludeSoon();
+    }, delayMs);
+}
+
+function getInterludeContext(index, seek = getSafeSeek()) {
+    if (!lyricsObjArr.value || !Array.isArray(lyricsObjArr.value)) return null;
+    if (!Number.isInteger(index) || index < 0) return null;
+
+    const nextIdx = findNextContentIndex(index);
+    if (nextIdx === -1) return null;
+
+    const currentSeek = Number(seek);
+    const nextLineTime = Number(lyricsObjArr.value[nextIdx]?.time ?? NaN);
+    const estEnd = estimateLineEndTimeSec(index, nextIdx);
+    if (!Number.isFinite(currentSeek) || !Number.isFinite(nextLineTime) || !Number.isFinite(estEnd)) return null;
+
+    return {
+        index,
+        currentSeek,
+        nextLineTime,
+        estEnd,
+        pureGap: nextLineTime - estEnd,
+        threshold: getInterludeThresholdSec(),
+    };
+}
+
+function hasInterludeGap(context) {
+    return !!context && context.pureGap >= context.threshold;
+}
+
+function stageInterlude(context) {
+    setInterludeDisplay({ index: context.index, animation: false, remaining: null });
+}
+
+function activateInterlude(context, { forceExitSchedule = false } = {}) {
+    clearInterludeOutTimer();
+    setInterludeDisplay({
+        index: context.index,
+        animation: true,
+        remaining: getInterludeRemainingSeconds(context.nextLineTime, context.currentSeek, context.estEnd),
+        fastClose: false,
+    });
+    scheduleInterludeExit(context.nextLineTime, context.currentSeek, { force: forceExitSchedule });
+}
+
+function scheduleInterludeEnter(context) {
+    if (!playing.value || !lyricShow.value) return;
+
+    const delayMs = Math.max(0, Math.round((context.estEnd - context.currentSeek) * 1000));
+    interludeDeferStartTimer = setTimeout(() => {
+        interludeDeferStartTimer = null;
+        if (lycCurrentIndex.value !== context.index || !playing.value || !lyricShow.value) return;
+
+        const nextContext = getInterludeContext(context.index, getSafeSeek());
+        if (!nextContext || !hasInterludeGap(nextContext)) {
+            closeInterludeSoon({ fastClose: true });
+            return;
+        }
+
+        if (nextContext.currentSeek < nextContext.estEnd) {
+            handleInterludeOnIndexChange(context.index);
+            return;
+        }
+
+        if (shouldStartInterludeExit(nextContext.nextLineTime, nextContext.currentSeek)) {
+            closeInterludeSoon();
+            return;
+        }
+
+        activateInterlude(nextContext, { forceExitSchedule: true });
+    }, delayMs);
+}
+
 // 当当前歌词行号变化时，根据阈值决定是否展示/收起间奏
 function handleInterludeOnIndexChange(newIdx) {
-    if (!lyricsObjArr.value || !Array.isArray(lyricsObjArr.value)) return;
-    if (typeof newIdx !== 'number') return;
-    if (newIdx < 0) {
-        interludeAnimation.value = false;
-        clearInterludeTimers();
-        interludeIndex.value = null;
-        interludeRemainingTime.value = null;
+    if (!Number.isInteger(newIdx) || newIdx < 0) {
+        resetInterludeState();
         return;
     }
 
-    // 只对“有下一句正文”的情况启用间奏，否则视为“没有下一句歌词”不展示
-    const nextIdx = findNextContentIndex(newIdx);
-    if (nextIdx === -1) {
-        interludeAnimation.value = false;
-        clearInterludeTimers();
-        interludeIndex.value = null;
-        interludeRemainingTime.value = null;
+    const context = getInterludeContext(newIdx);
+    if (!context) {
+        resetInterludeState();
         return;
     }
-
-    const currentSeek = getSafeSeek();
-    const nextLineTime = Number(lyricsObjArr.value[nextIdx]?.time ?? NaN);
-    if (!Number.isFinite(nextLineTime)) return;
-
-    const threshold = Number(lyricInterludeTime.value || 0);
 
     // 先清理任何既有定时器
     clearInterludeTimers();
 
-    // 启发式：以“上一句预计结束时间”为起点计算纯间奏
-    const estEnd = estimateLineEndTimeSec(newIdx, nextIdx);
-    if (!Number.isFinite(estEnd)) return;
-    const pureGap = nextLineTime - estEnd; // 仅“上一句结束”到“下一句开始”的空档
+    if (hasInterludeGap(context)) {
+        stageInterlude(context);
 
-    if (pureGap >= threshold) {
-        interludeIndex.value = newIdx;
-        interludeAnimation.value = false;
-        const delayMs = Math.max(0, Math.round((estEnd - currentSeek) * 1000));
-        interludeDeferStartTimer = setTimeout(() => {
-            if (lycCurrentIndex.value !== newIdx) return;
-            interludeAnimation.value = true;
-            interludeDeferStartTimer = null;
-        }, delayMs);
-    } else {
-        // 不满足阈值：确保不展示
-        interludeAnimation.value = false;
-        interludeFastClose.value = true;
-        interludeOutTimer = setTimeout(() => {
-            interludeIndex.value = null;
-            interludeFastClose.value = false;
-            interludeOutTimer = null;
-        }, 900);
-        interludeRemainingTime.value = null;
+        if (context.currentSeek >= context.estEnd) {
+            if (shouldStartInterludeExit(context.nextLineTime, context.currentSeek)) {
+                closeInterludeSoon();
+            } else {
+                activateInterlude(context, { forceExitSchedule: true });
+            }
+            return;
+        }
+
+        scheduleInterludeEnter(context);
+        return;
     }
+
+    // 不满足阈值：确保不展示
+    closeInterludeSoon({ fastClose: true });
 }
 
-// 在进度变化时，仅更新倒计时与“<1s 收起”的判断（不做阈值判断，避免提前收起）
-function handleInterludeOnProgress() {
-    if (!lyricsObjArr.value || !Array.isArray(lyricsObjArr.value)) return;
+// 在进度变化时同步倒计时与当前间奏状态，覆盖同一句内拖动进度的情况
+function handleInterludeOnProgress(tickerSeek = null) {
     if (!playing.value || !lyricShow.value) return;
     const idx = typeof lycCurrentIndex.value === 'number' ? lycCurrentIndex.value : -1;
     if (idx < 0) return;
 
-    // 若没有下一句“有正文内容”的歌词，则不展示/继续间奏
-    const nextIdx = findNextContentIndex(idx);
-    if (nextIdx === -1) {
-        interludeAnimation.value = false;
-        clearInterludeTimers();
-        interludeIndex.value = null;
-        interludeRemainingTime.value = null;
+    const parsedTickerSeek = Number(tickerSeek);
+    const currentSeek = Number.isFinite(parsedTickerSeek) ? parsedTickerSeek : getSafeSeek();
+    const context = getInterludeContext(idx, currentSeek);
+    if (!context) {
+        resetInterludeState();
         return;
     }
-
-    const currentSeek = getSafeSeek();
-    const nextLineTime = Number(lyricsObjArr.value[nextIdx]?.time ?? NaN);
-    if (!Number.isFinite(nextLineTime)) return;
-    const estEnd = estimateLineEndTimeSec(idx, nextIdx);
-    if (!Number.isFinite(estEnd)) return;
 
     // 若尚未到“上一句预计结束”时刻，则不应显示动画
-    if (currentSeek < estEnd) {
-        interludeAnimation.value = false;
-        interludeRemainingTime.value = null;
+    if (context.currentSeek < context.estEnd) {
+        setInterludeDisplay({ animation: false, remaining: null });
+        clearInterludeExitStartTimer();
         return;
     }
 
-    const gap = nextLineTime - currentSeek; // 距离下一句开始的剩余秒
-    const pureGapRemaining = nextLineTime - Math.max(currentSeek, estEnd); // 仅剩余的纯间奏秒数
-    if (gap < 1) {
-        interludeAnimation.value = false;
-        clearInterludeTimers();
-        interludeOutTimer = setTimeout(() => {
-            interludeIndex.value = null;
-            interludeOutTimer = null;
-        }, 900);
-        interludeRemainingTime.value = null;
-    } else {
-        interludeRemainingTime.value = Math.max(0, Math.trunc(pureGapRemaining - 1));
+    if (!hasInterludeGap(context)) {
+        closeInterludeSoon({ fastClose: true });
+        return;
     }
+
+    if (shouldStartInterludeExit(context.nextLineTime, context.currentSeek)) {
+        closeInterludeSoon();
+    } else {
+        activateInterlude(context);
+    }
+}
+
+function stopInterludeProgressSync() {
+    if (!stopInterludeProgressTicker) return;
+    stopInterludeProgressTicker();
+    stopInterludeProgressTicker = null;
+}
+
+function startInterludeProgressSync() {
+    stopInterludeProgressSync();
+    stopInterludeProgressTicker = subscribePlaybackTick(
+        snapshot => {
+            handleInterludeOnProgress(snapshot.seek);
+        },
+        {
+            id: 'lyric-interlude-progress',
+            interval: PLAYBACK_TICK_FAST_INTERVAL_MS,
+            immediate: true,
+        }
+    );
 }
 
 // Resize 触发同步：容器尺寸改变后重新测量与同步（debounce 避免动画过程中逐帧重算）
@@ -1402,8 +1519,7 @@ const scheduleLayout = () => {
     if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
     resizeDebounceTimer = setTimeout(async () => {
         resizeDebounceTimer = 0;
-        const behavior = (lyricAreaReady.value && !suppressLyricFlash.value) ? 'smooth' : 'auto';
-        await applyLyricLayout({ syncBehavior: behavior });
+        await applyLyricLayout({ syncBehavior: 'auto' });
     }, 120);
 };
 
@@ -1416,7 +1532,34 @@ watch(
     { deep: true, flush: 'post' }
 );
 
-// 歌词字体大小变化时重新计算布局
+// 当“间奏阈值”调整时，重新校准本歌演唱速率模型
+watch(
+    () => lyricInterludeTime.value,
+    () => {
+        recomputeSongTimingModel();
+        handleInterludeOnIndexChange(lycCurrentIndex.value);
+        handleInterludeOnProgress();
+    }
+);
+
+// 当区域从隐藏 -> 显示时，统一走准备流程；隐藏时立即取消旧的 reveal 任务
+watch(
+    showLyricArea,
+    async visible => {
+        if (visible) {
+            void prepareLyricReveal();
+            if (shouldShowVisualizer.value) {
+                await nextTick();
+                ensureVisualizerSizeTracking();
+            }
+            return;
+        }
+
+        invalidateLyricReveal();
+    },
+    { flush: 'post' }
+);
+
 watch(
     [lyricSize, tlyricSize, rlyricSize],
     () => recalcLyricLayout({ syncBehavior: 'auto' }),
@@ -1430,38 +1573,7 @@ watch(
     { flush: 'post' }
 );
 
-// 当“间奏阈值”调整时，重新校准本歌演唱速率模型
-watch(
-    () => lyricInterludeTime.value,
-    () => {
-        recomputeSongTimingModel();
-    }
-);
-
-// 观察歌词区域的真实可见性（包含 lyrics 存在、显示开关和原文开关，并且有可显示的原文内容）
-const lyricAreaVisible = computed(() => {
-    return showLyricArea.value;
-});
-
-// 当区域从隐藏 -> 显示时，统一走准备流程；隐藏时立即取消旧的 reveal 任务
-watch(
-    lyricAreaVisible,
-    async (visible) => {
-        if (visible) {
-            await prepareLyricReveal();
-            if (shouldShowVisualizer.value) {
-                await nextTick();
-                ensureVisualizerSizeTracking();
-            }
-            return;
-        }
-
-        invalidateLyricReveal();
-    },
-    { flush: 'post' }
-);
-
-// 可视化器配置发生变化时，规范输入并刷新画布
+// 可视化器 watches
 watch([visualizerFrequencyMinValue, visualizerFrequencyMaxValue], () => {
     renderVisualizerPreview();
 });
@@ -1471,25 +1583,6 @@ watch(
     value => {
         const safe = visualizerBaseHeightPx.value;
         if (value !== safe) lyricVisualizerHeight.value = safe;
-    },
-    { immediate: true }
-);
-
-watch(
-    [() => lyricVisualizerFrequencyMin.value, () => lyricVisualizerFrequencyMax.value],
-    ([min, max]) => {
-        const { min: safeMin, max: safeMax } = normalizeFrequencyRange(min, max);
-        if (min !== safeMin) lyricVisualizerFrequencyMin.value = safeMin;
-        if (max !== safeMax) lyricVisualizerFrequencyMax.value = safeMax;
-    },
-    { immediate: true }
-);
-
-watch(
-    () => lyricVisualizerTransitionDelay.value,
-    value => {
-        const safe = visualizerSmoothing.value;
-        if (value !== safe) lyricVisualizerTransitionDelay.value = safe;
     },
     { immediate: true }
 );
@@ -1517,15 +1610,6 @@ watch(visualizerSmoothing, () => {
     renderVisualizerPreview();
 });
 
-watch(
-    () => lyricVisualizerStyle.value,
-    value => {
-        const safe = visualizerStyleValue.value;
-        if (value !== safe) lyricVisualizerStyle.value = safe;
-    },
-    { immediate: true }
-);
-
 watch(visualizerStyleValue, () => {
     resetVisualizerLevels();
     nextTick(() => {
@@ -1533,46 +1617,6 @@ watch(visualizerStyleValue, () => {
         renderVisualizerPreview();
     });
 });
-
-watch(
-    () => lyricVisualizerRadialSize.value,
-    value => {
-        const safe = visualizerRadialSizeValue.value;
-        if (value !== safe) lyricVisualizerRadialSize.value = safe;
-        renderVisualizerPreview();
-    },
-    { immediate: true }
-);
-
-watch(
-    () => lyricVisualizerRadialOffsetX.value,
-    value => {
-        const safe = visualizerRadialOffsetXValue.value;
-        if (value !== safe) lyricVisualizerRadialOffsetX.value = safe;
-        renderVisualizerPreview();
-    },
-    { immediate: true }
-);
-
-watch(
-    () => lyricVisualizerRadialOffsetY.value,
-    value => {
-        const safe = visualizerRadialOffsetYValue.value;
-        if (value !== safe) lyricVisualizerRadialOffsetY.value = safe;
-        renderVisualizerPreview();
-    },
-    { immediate: true }
-);
-
-watch(
-    () => lyricVisualizerRadialCoreSize.value,
-    value => {
-        const safe = visualizerRadialCoreSizeValue.value;
-        if (value !== safe) lyricVisualizerRadialCoreSize.value = safe;
-        renderVisualizerPreview();
-    },
-    { immediate: true }
-);
 
 watch(
     () => lyricVisualizerColor.value,
@@ -1583,12 +1627,9 @@ watch(
 
 watch(
     () => lyricVisualizerOpacity.value,
-    value => {
-        const safe = visualizerOpacityValue.value;
-        if (value !== safe) lyricVisualizerOpacity.value = safe;
+    () => {
         renderVisualizerPreview();
-    },
-    { immediate: true }
+    }
 );
 
 watch(
@@ -1648,7 +1689,7 @@ watch(
     async (newIndex) => {
         // 若上一行存在已展开的间奏，为防止其收起过渡影响高度测量，启用快速折叠
         if (interludeIndex.value != null && interludeIndex.value !== newIndex) {
-            interludeFastClose.value = true;
+            setInterludeDisplay({ fastClose: true });
         }
         lycCurrentIndex.value = newIndex;
         // 普通播放换句保持旧版节奏：DOM patch 后立即启动跟随动画，避免多等一帧导致“高亮先跳、视图后追”
@@ -1657,7 +1698,7 @@ watch(
         syncLyricPosition({ behavior: 'smooth' });
         // 短暂延时后恢复正常过渡（供后续可能的间奏展开使用）
         if (interludeFastClose.value) {
-            setTimeout(() => { interludeFastClose.value = false; }, 120);
+            scheduleInterludeFastCloseReset();
         }
         // 仅在索引变化时做阈值判断，是否展示/收起间奏
         handleInterludeOnIndexChange(newIndex);
@@ -1682,10 +1723,11 @@ const changeProgressLyc = (time, index, item = null) => {
 watch(
     () => progress.value,
     (newVal, oldVal) => {
-        // 仅更新倒计时与 <1s 收起，不做阈值判断
-        handleInterludeOnProgress();
+        // 普通播放 tick 只同步倒计时；大幅跳转会在下方重新跑完整间奏判断
+        handleInterludeOnProgress(newVal);
         if (typeof oldVal !== 'number') return;
         if (Math.abs(newVal - oldVal) <= 1.2) return;
+        handleInterludeOnIndexChange(lycCurrentIndex.value);
         syncLyricPosition({ behavior: 'smooth' });
     }
 );
@@ -1723,8 +1765,10 @@ onMounted(() => {
 onUnmounted(() => {
     invalidateLyricReveal();
     clearInterludeTimers();
+    clearInterludeFastCloseResetTimer();
     clearManualScrollReleaseTimer();
     cancelLyricScrollAnimation();
+    stopInterludeProgressSync();
     if (lyricWheelHandler && lyricScroll.value) {
         lyricScroll.value.removeEventListener('wheel', lyricWheelHandler);
         lyricWheelHandler = null;
@@ -1741,14 +1785,18 @@ onUnmounted(() => {
     analyserDataArray = null;
 });
 
-// 间奏进度同步由 progress watcher 驱动，playing/lyricShow 仅需在停止状态时清理（无额外 interval 需要清理）
+// 启动/停止 200ms 的间奏同步，复用全局播放节拍
 watch([playing, lyricShow], ([p, show]) => {
-    if (!p || !show) {
-        // 间奏状态重置
-        interludeAnimation.value = false;
-        interludeRemainingTime.value = null;
+    if (p && show) {
+        startInterludeProgressSync();
+        handleInterludeOnIndexChange(lycCurrentIndex.value);
+    } else {
+        stopInterludeProgressSync();
+        clearInterludeDeferStartTimer();
+        clearInterludeExitStartTimer();
+        if (!show) resetInterludeState();
     }
-});
+}, { immediate: true });
 </script>
 
 <template>
@@ -1763,7 +1811,7 @@ watch([playing, lyricShow], ([p, show]) => {
             <div
                 v-show="showLyricArea"
                 class="lyric-area"
-                :class="{ 'no-flash': suppressLyricFlash || !lyricAreaReady }"
+                :class="{ 'no-flash': !lyricAreaReady }"
                 ref="lyricScroll"
             >
                 <div class="lyric-content" ref="lyricContent">
@@ -1771,7 +1819,7 @@ watch([playing, lyricShow], ([p, show]) => {
                 <div class="lyric-line" v-for="(item, index) in lyricsObjArr" v-show="item.lyric" :key="index">
                     <div class="line" @click="changeProgressLyc(item.time, index, item)" :class="{ 'line-highlight': index == lycCurrentIndex, 'lyric-inactive': !isLyricActive || item.active, 'line-static': isUntimedLyrics || item.untimed }">
                         <span class="roma" :style="{ 'font-size': rlyricSize + 'px' }" v-if="item.rlyric && lyricType.indexOf('roma') != -1">{{ item.rlyric }}</span>
-                        <span class="original" :style="{ 'font-size': lyricSize + 'px' }" v-if="lyricType.indexOf('original') != -1">{{ item.lyric }}</span>
+                        <span class="original" :style="{ 'font-size': lyricSize + 'px' }" v-if="showOriginalLyric">{{ item.lyric }}</span>
                         <span class="trans" :style="{ 'font-size': tlyricSize + 'px' }" v-if="item.tlyric && lyricType.indexOf('trans') != -1">{{ item.tlyric }}</span>
                         <div
                             class="hilight"
@@ -1914,7 +1962,7 @@ watch([playing, lyricShow], ([p, show]) => {
                 </div>
             </div>
         </Transition>
-        <Transition name="fade">
+        <Transition name="fade" @before-leave="markNoDataLeave">
             <div v-show="showLyricNoData" class="lyric-nodata">
                 <div class="line1"></div>
                 <span class="tip">Lyric-Area</span>
@@ -2191,7 +2239,8 @@ watch([playing, lyricShow], ([p, show]) => {
         flex-direction: row;
         justify-content: center;
         align-items: center;
-        position: relative;
+        position: absolute;
+        inset: 0;
         .line1,
         .line2 {
             width: 0;

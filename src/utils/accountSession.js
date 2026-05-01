@@ -1,14 +1,18 @@
 import pinia from '../store/pinia'
+import { refreshLogin } from '../api/login'
 import { getLikelist, getUserPlaylist, getUserProfile, logout } from '../api/user'
 import { useUserStore } from '../store/userStore'
-import { resolveFavoritePlaylistMeta } from './player'
-import { isLogin, setCookies } from './authority'
+import { useCloudStore } from '../store/cloudStore'
+import { getCookie, isLogin, setCookies, updateStoredAuthCookies } from './authority'
 import { clearAccountScopedState } from './accountState'
 import { invalidateNcmApiCookieCache } from './request'
+import { resolveFavoritePlaylistMeta } from './favoritePlaylist'
+import { runIdleTask } from './player/idleTask'
 
 const userStore = useUserStore(pinia)
 
 let accountSessionToken = 0
+const cloudDiskDataPreloadMaxAge = 5 * 60 * 1000
 
 function nextAccountSessionToken() {
     accountSessionToken += 1
@@ -17,6 +21,31 @@ function nextAccountSessionToken() {
 
 function isAccountSessionTokenActive(token) {
     return token === accountSessionToken
+}
+
+function scheduleCloudDiskDataPreload(profile) {
+    const userId = profile?.userId
+    if (!userId || !userStore.cloudDiskPage) return
+
+    const normalizedUserId = String(userId)
+    void runIdleTask(async () => {
+        if (!isLogin() || String(userStore.user?.userId || '') !== normalizedUserId || !userStore.cloudDiskPage) return
+
+        const cloudStore = useCloudStore(pinia)
+        await cloudStore.refreshCloudData(normalizedUserId, { maxAge: cloudDiskDataPreloadMaxAge })
+    }, { timeout: 1800, fallbackDelay: 900 }).catch(() => {})
+}
+
+async function ensureCsrfCookie() {
+    if (getCookie('__csrf')) return
+
+    try {
+        const refreshResult = await refreshLogin()
+        updateStoredAuthCookies(refreshResult)
+        invalidateNcmApiCookieCache()
+    } catch (error) {
+        console.warn('刷新网易云登录 Cookie 失败:', error)
+    }
 }
 
 async function hydrateAccountSession(token) {
@@ -52,7 +81,7 @@ async function hydrateAccountSession(token) {
             timestamp: Date.now(),
         })
         if (isAccountSessionTokenActive(token)) {
-            userStore.updateFavoritePlaylistMeta(resolveFavoritePlaylistMeta(playlistResult?.playlist))
+            userStore.updateFavoritePlaylistMeta(resolveFavoritePlaylistMeta(playlistResult?.playlist, profile.userId))
         }
     } catch (error) {
         if (isAccountSessionTokenActive(token)) {
@@ -61,6 +90,7 @@ async function hydrateAccountSession(token) {
         console.error('加载喜欢歌单信息失败:', error)
     }
 
+    scheduleCloudDiskDataPreload(profile)
     return profile
 }
 
@@ -79,8 +109,9 @@ export async function initializeCurrentAccountSession() {
         return null
     }
 
-    await clearAccountScopedState({ clearCookies: false, clearSessionCookies: true })
+    await clearAccountScopedState({ clearCookies: false, clearSessionCookies: true, clearStores: false })
     invalidateNcmApiCookieCache()
+    await ensureCsrfCookie()
 
     try {
         return await hydrateAccountSession(token)
@@ -98,6 +129,7 @@ export async function applyLoginSession(data) {
 
     setCookies(data)
     invalidateNcmApiCookieCache()
+    await ensureCsrfCookie()
 
     try {
         return await hydrateAccountSession(token)

@@ -1,19 +1,21 @@
 <script setup>
+  import { computed } from 'vue'
   import { RecycleScroller } from 'vue-virtual-scroller'
   import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
-  import { pauseMusic } from '../utils/player';
-  import { addSong, setShuffledList } from '../utils/player'
+  import { pauseMusic, addSong, setShuffledList } from '../utils/player/lazy'
   import { useRouter } from 'vue-router';
   import { usePlayerStore } from '../store/playerStore'
   import { storeToRefs } from 'pinia'
   import { getSongDisplayName } from '../utils/songName'
+  import { getIndexedSong } from '../utils/songList'
   const router = useRouter()
   const playerStore = usePlayerStore()
   const { playing, progress, playMode, currentMusic, currentIndex, listInfo, songList, shuffledList, shuffleIndex, songId, widgetState, playlistWidgetShow, lyricShow, showSongTranslation } = storeToRefs(playerStore)
+  const currentSong = computed(() => getIndexedSong(songList.value, currentIndex.value))
 
   const clearPlaylist = () => {
     playlistWidgetShow.value = false
-    pauseMusic()
+    void pauseMusic()
     const clearMusic = setTimeout(() => {
       songList.value = null
       listInfo.value = null
@@ -21,7 +23,7 @@
       shuffledList.value = null
       currentIndex.value = 0
       shuffleIndex.value = 0
-      currentMusic.value.unload()
+      currentMusic.value?.unload?.()
       currentMusic.value = null
       progress.value = 0
       if(!widgetState.value) {
@@ -35,15 +37,15 @@
 
   const checkArtist = (artistId) => {
     if(!artistId) return
-    if(songList.value[currentIndex.value].type != 'local') {
+    if(currentSong.value && currentSong.value.type != 'local') {
       router.push('/mymusic/artist/' + artistId)
       playerStore.forbidLastRouter = true
       if(!widgetState.value) {widgetState.value = true;playlistWidgetShow.value = false;lyricShow.value = false}
     }
   }
 
-  const play = (id, index) => {
-    addSong(id, index, true)
+  const play = async (id, index) => {
+    await addSong(id, index, true)
   }
 
   const delCurrentSong = async (index, id) => {
@@ -51,13 +53,13 @@
     if(index < currentIndex.value) {
       songList.value.splice(index, 1)
       currentIndex.value--
-      if(playMode.value == 3) setShuffledList()
+      if(playMode.value == 3) await setShuffledList()
       return
     }
     //·删除的是当前播放歌曲之后的
     if(index > currentIndex.value) {
       songList.value.splice(index, 1)
-      if(playMode.value == 3) setShuffledList()
+      if(playMode.value == 3) await setShuffledList()
       return
     }
     //·删除的是当前播放歌曲
@@ -71,23 +73,24 @@
         //且不只有一首歌
         curIndex = index - 1
         id = songList.value[curIndex].id
-        addSong(id, curIndex, playing.value)
+        await addSong(id, curIndex, playing.value)
         songList.value.splice(index, 1)
-        if(playMode.value == 3) setShuffledList()
+        if(playMode.value == 3) await setShuffledList()
       } else {
       //·如果不是最后一首
         curIndex = currentIndex.value + 1
         id = songList.value[curIndex].id
-        addSong(id, curIndex, playing.value)
+        await addSong(id, curIndex, playing.value)
         songList.value.splice(index, 1)
         currentIndex.value--
-        if(playMode.value == 3) setShuffledList()
+        if(playMode.value == 3) await setShuffledList()
       }
     }
   }
   const getPositon = () => {
-    document.getElementsByClassName('playlist-widget-item')[0].scrollTo({top: currentIndex.value * 37,behavior: 'smooth'})
-    document.getElementsByClassName('playlist-widget-item')[1].scrollTo({top: currentIndex.value * 37,behavior: 'smooth'})
+    Array.from(document.getElementsByClassName('playlist-widget-item')).forEach(element => {
+      element.scrollTo({top: currentIndex.value * 37,behavior: 'smooth'})
+    })
   }
 </script>
 

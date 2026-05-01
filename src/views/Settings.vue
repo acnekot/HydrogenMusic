@@ -8,10 +8,16 @@ import { isLogin } from '@/utils/authority'
 import { useUserStore } from '@/store/userStore'
 import { usePlayerStore } from '@/store/playerStore'
 import Selector from '../components/Selector.vue'
+import FontSelector from '../components/FontSelector.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
 import { setTheme, getSavedTheme } from '@/utils/theme'
 import { logoutCurrentAccountSession } from '@/utils/accountSession'
 import { getSettingsSnapshot, setCachedSettingsSnapshot } from '@/utils/settingsSnapshot'
+import { applyCustomFontStyle, syncDesktopLyricCustomFont } from '@/utils/setFont'
+import { buildFontOptions, loadSystemFontOptions, resolveSystemFontLabel, resolveSystemFontValue } from '@/utils/fontResolver'
+import settingsSchema from '@/shared/settingsSchema.js'
+
+const { MUSIC_LEVEL_OPTIONS, normalizeSettings } = settingsSchema
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -19,44 +25,7 @@ const playerStore = usePlayerStore()
 
 const vipInfo = ref(null)
 const musicLevel = ref('lossless')
-const musicLevelOptions = ref([
-    {
-        label: '标准',
-        value: 'standard',
-    },
-    {
-        label: '较高',
-        value: 'higher',
-    },
-    {
-        label: '极高',
-        value: 'exhigh',
-    },
-    {
-        label: '无损',
-        value: 'lossless',
-    },
-    {
-        label: 'Hi-Res',
-        value: 'hires',
-    },
-    {
-        label: '高清环绕声',
-        value: 'jyeffect',
-    },
-    {
-        label: '沉浸环绕声',
-        value: 'sky',
-    },
-    {
-        label: '杜比全景声',
-        value: 'dolby',
-    },
-    {
-        label: '超清母带',
-        value: 'jymaster',
-    },
-])
+const musicLevelOptions = ref(MUSIC_LEVEL_OPTIONS.map(option => ({ ...option })))
 const lyricSize = ref(20)
 const tlyricSize = ref(13)
 const rlyricSize = ref(12)
@@ -100,18 +69,25 @@ const shortcutsList = ref(null)
 const selectedShortcut = ref(null)
 const newShortcut = ref([])
 const shortcutCharacter = ['=', '-', '~', '@', '#', '$', '[', ']', ';', "'", ',', '.', '/', '!']
+const customFont = ref('')
+const customFontLabel = ref('')
+const systemFonts = ref([])
+const systemFontsLoading = ref(false)
+let systemFontsLoadPromise = null
+
+const fontOptions = computed(() => buildFontOptions({
+    systemFonts: systemFonts.value,
+    customFont: customFont.value,
+    customFontLabel: customFontLabel.value,
+}))
 
 // 更新相关状态
 const showUpdateDialog = ref(false)
 const newVersion = ref('')
 let updateListenersInitialized = false
 let removeUpdateListeners = null
-
-const normalizeSearchAssistLimit = value => {
-    const num = Number.parseInt(value, 10)
-    if (!Number.isFinite(num)) return 8
-    return Math.max(1, num)
-}
+const PERFORMANCE_CONFIRM_MESSAGE = '开启后此功能会消耗一定性能且可能造成卡顿，确定开启吗？'
+const GAPLESS_CONFIRM_MESSAGE = '开启后会提前预缓冲下一首音频，可能增加网络流量和内存占用，确定开启吗？'
 
 const loadVipInfo = async () => {
     const requestUserId = userStore.user?.userId
@@ -133,23 +109,28 @@ const loadVipInfo = async () => {
 
 const applySettingsToForm = settings => {
     if (!settings) return
-    musicLevel.value = settings.music.level
-    lyricSize.value = settings.music.lyricSize
-    tlyricSize.value = settings.music.tlyricSize
-    rlyricSize.value = settings.music.rlyricSize
-    lyricInterlude.value = settings.music.lyricInterlude
-    searchAssistLimit.value = normalizeSearchAssistLimit(settings.music.searchAssistLimit)
-    playerStore.showSongTranslation = settings?.music?.showSongTranslation !== false
-    commentFontSize.value = Number(settings?.music?.commentFontSize) || 13
-    globalZoom.value = Number(settings?.other?.globalZoom) || 1
-    videoFolder.value = settings.local.videoFolder
-    downloadFolder.value = settings.local.downloadFolder
-    downloadCreateSongFolder.value = !!settings.local.downloadCreateSongFolder
-    downloadSaveLyricFile.value = !!settings.local.downloadSaveLyricFile
-    localFolder.value = settings.local.localFolder
-    shortcutsList.value = settings.shortcuts
-    globalShortcuts.value = settings.other.globalShortcuts
-    quitApp.value = settings.other.quitApp
+    const normalizedSettings = normalizeSettings(settings)
+    musicLevel.value = normalizedSettings.music.level
+    lyricSize.value = normalizedSettings.music.lyricSize
+    tlyricSize.value = normalizedSettings.music.tlyricSize
+    rlyricSize.value = normalizedSettings.music.rlyricSize
+    lyricInterlude.value = normalizedSettings.music.lyricInterlude
+    searchAssistLimit.value = normalizedSettings.music.searchAssistLimit
+    playerStore.showSongTranslation = normalizedSettings.music.showSongTranslation !== false
+    playerStore.gaplessPlayback = normalizedSettings.music.gaplessPlayback === true
+    playerStore.audioVisualizer = normalizedSettings.music.audioVisualizer === true
+    commentFontSize.value = Number(normalizedSettings?.music?.commentFontSize) || 13
+    globalZoom.value = Number(normalizedSettings?.other?.globalZoom) || 1
+    videoFolder.value = normalizedSettings.local.videoFolder
+    downloadFolder.value = normalizedSettings.local.downloadFolder
+    downloadCreateSongFolder.value = !!normalizedSettings.local.downloadCreateSongFolder
+    downloadSaveLyricFile.value = !!normalizedSettings.local.downloadSaveLyricFile
+    localFolder.value = normalizedSettings.local.localFolder
+    shortcutsList.value = normalizedSettings.shortcuts
+    globalShortcuts.value = normalizedSettings.other.globalShortcuts
+    quitApp.value = normalizedSettings.other.quitApp
+    customFont.value = normalizedSettings.other.customFont
+    customFontLabel.value = normalizedSettings.other.customFontLabel
     // 自定义背景读取（含兼容旧字段）
     const cb = settings.customBackground || {}
     const cbEnabled = cb.enabled ?? settings.customBackgroundEnabled
@@ -169,8 +150,8 @@ const applySettingsToForm = settings => {
 }
 
 onActivated(() => {
-    void getSettingsSnapshot().then(settings => {
-        applySettingsToForm(settings)
+    void getSettingsSnapshot().then(applySettingsToForm)
+    void loadSystemFonts()
 
     // Initialize theme selection
     try {
@@ -184,9 +165,8 @@ onActivated(() => {
     // 设置更新事件监听器
     setupUpdateListeners()
 })
-})
 
-// 当从”首页/子页”切换到”主播放器界面”（widgetState: true -> false）时，
+// 当从“首页/子页”切换到“主播放器界面”（widgetState: true -> false）时，
 // 如果当前仍处于设置路由，则自动保存设置（避免未发生路由切换导致 onBeforeRouteLeave 不触发）。
 watch(
     () => playerStore.widgetState,
@@ -195,8 +175,7 @@ watch(
             const isLeavingToPlayer = prev === true && now === false
             const inSettings = router.currentRoute.value?.name === 'settings'
             if (isLeavingToPlayer && inSettings) {
-                const snapshot = setAppSettings()
-                initSettings({ settings: snapshot, hydrateLocalMusic: true })
+                saveSettings()
                 noticeOpen('设置已保存', 2)
             }
         } catch (_) {
@@ -242,8 +221,10 @@ const setAppSettings = () => {
             tlyricSize: tlyricSize.value,
             rlyricSize: rlyricSize.value,
             lyricInterlude: lyricInterlude.value,
-            searchAssistLimit: normalizeSearchAssistLimit(searchAssistLimit.value),
+            searchAssistLimit: searchAssistLimit.value,
             showSongTranslation: playerStore.showSongTranslation,
+            gaplessPlayback: playerStore.gaplessPlayback,
+            audioVisualizer: playerStore.audioVisualizer,
             commentFontSize: commentFontSize.value,
         },
         local: {
@@ -258,6 +239,8 @@ const setAppSettings = () => {
             globalShortcuts: globalShortcuts.value,
             quitApp: quitApp.value,
             globalZoom: globalZoom.value,
+            customFont: customFont.value,
+            customFontLabel: customFont.value ? customFontLabel.value : '',
         },
         customBackground: {
             enabled: playerStore.customBackgroundEnabled,
@@ -270,10 +253,53 @@ const setAppSettings = () => {
         },
     }
 
-    const snapshot = setCachedSettingsSnapshot(settings)
-    windowApi.setSettings(JSON.stringify(settings))
+    const normalizedSettings = normalizeSettings(settings)
+    const snapshot = setCachedSettingsSnapshot(normalizedSettings)
+    windowApi.setSettings(JSON.stringify(normalizedSettings))
     applySettingsSnapshot(snapshot, { hydrateLocalMusic: false })
+    syncDesktopLyricCustomFont(snapshot?.other?.customFont, snapshot?.other?.customFontLabel)
     return snapshot
+}
+
+const saveSettings = () => {
+    initSettings({ settings: setAppSettings(), hydrateLocalMusic: true })
+}
+
+const setCustomFont = (font, option = null) => {
+    const rawFont = typeof font === 'string' ? font : customFont.value
+    const resolvedFont = resolveSystemFontValue(rawFont)
+    const fallbackLabel = option?.label || customFontLabel.value || rawFont
+    const resolvedLabel = resolvedFont
+        ? String(resolveSystemFontLabel(resolvedFont, fallbackLabel, systemFonts.value)).trim()
+        : ''
+    const appliedFont = applyCustomFontStyle(resolvedFont, resolvedLabel)
+    customFont.value = appliedFont
+    customFontLabel.value = appliedFont ? resolvedLabel : ''
+}
+
+const refreshCustomFont = () => {
+    if (customFont.value) setCustomFont(customFont.value)
+    return systemFonts.value
+}
+
+const loadSystemFonts = async () => {
+    if (systemFonts.value.length > 0) {
+        return refreshCustomFont()
+    }
+    if (systemFontsLoadPromise) return systemFontsLoadPromise
+
+    systemFontsLoading.value = true
+    systemFontsLoadPromise = loadSystemFontOptions()
+        .then(fonts => {
+            systemFonts.value = Array.isArray(fonts) ? fonts : []
+            return refreshCustomFont()
+        })
+        .finally(() => {
+            systemFontsLoading.value = false
+            systemFontsLoadPromise = null
+        })
+
+    return systemFontsLoadPromise
 }
 
 // apply theme immediately when user changes
@@ -604,30 +630,6 @@ const resetLyricVisualizerRadialCoreSize = () => { playerStore.lyricVisualizerRa
 const resetCustomBackgroundBlur = () => { playerStore.customBackgroundBlur = customBackgroundDefaults.blur }
 const resetCustomBackgroundBrightness = () => { playerStore.customBackgroundBrightness = customBackgroundDefaults.brightness }
 
-watch(() => playerStore.lyricVisualizerHeight, value => { const safe = sanitizeHeight(value); if (value !== safe) playerStore.lyricVisualizerHeight = safe; addChoiceValue(lyricVisualizerHeightValues, safe) }, { immediate: true })
-watch([() => playerStore.lyricVisualizerFrequencyMin, () => playerStore.lyricVisualizerFrequencyMax], ([min, max]) => {
-    const { min: safeMin, max: safeMax } = sanitizeFrequencyRange(min, max)
-    if (min !== safeMin) playerStore.lyricVisualizerFrequencyMin = safeMin
-    if (max !== safeMax) playerStore.lyricVisualizerFrequencyMax = safeMax
-    addChoiceValue(lyricVisualizerFrequencyMinValues, safeMin)
-    addChoiceValue(lyricVisualizerFrequencyMaxValues, safeMax)
-}, { immediate: true })
-watch(() => playerStore.lyricVisualizerBarCount, value => { const safe = sanitizeBarCount(value); if (value !== safe) playerStore.lyricVisualizerBarCount = safe; addChoiceValue(lyricVisualizerBarCountValues, safe) }, { immediate: true })
-watch(() => playerStore.lyricVisualizerBarWidth, value => { const safe = sanitizeBarWidth(value); if (value !== safe) playerStore.lyricVisualizerBarWidth = safe; addChoiceValue(lyricVisualizerBarWidthValues, safe) }, { immediate: true })
-watch(() => playerStore.lyricVisualizerStyle, value => { const safe = sanitizeVisualizerStyle(value); if (value !== safe) playerStore.lyricVisualizerStyle = safe }, { immediate: true })
-watch(() => playerStore.lyricVisualizerTransitionDelay, value => { const safe = sanitizeTransitionDelay(value); if (value !== safe) playerStore.lyricVisualizerTransitionDelay = safe; addChoiceValue(lyricVisualizerTransitionDelayValues, safe) }, { immediate: true })
-watch(() => playerStore.lyricVisualizerOpacity, value => { const safe = sanitizeOpacity(value); if (value !== safe) playerStore.lyricVisualizerOpacity = safe; addChoiceValue(lyricVisualizerOpacityValues, safe) }, { immediate: true })
-watch(() => playerStore.lyricVisualizerRadialSize, value => { const safe = sanitizeRadialSize(value); if (value !== safe) playerStore.lyricVisualizerRadialSize = safe; addChoiceValue(lyricVisualizerRadialSizeValues, safe) }, { immediate: true })
-watch(() => playerStore.lyricVisualizerRadialOffsetX, value => { const safe = sanitizeRadialOffset(value); if (value !== safe) playerStore.lyricVisualizerRadialOffsetX = safe; addChoiceValue(lyricVisualizerRadialOffsetXValues, safe) }, { immediate: true })
-watch(() => playerStore.lyricVisualizerRadialOffsetY, value => { const safe = sanitizeRadialOffset(value); if (value !== safe) playerStore.lyricVisualizerRadialOffsetY = safe; addChoiceValue(lyricVisualizerRadialOffsetYValues, safe) }, { immediate: true })
-watch(() => playerStore.lyricVisualizerRadialCoreSize, value => { const safe = sanitizeRadialCoreSize(value); if (value !== safe) playerStore.lyricVisualizerRadialCoreSize = safe; addChoiceValue(lyricVisualizerRadialCoreSizeValues, safe) }, { immediate: true })
-watch(() => playerStore.lyricVisualizerColor, value => { if (value !== 'black' && value !== 'white') playerStore.lyricVisualizerColor = lyricVisualizerDefaults.color }, { immediate: true })
-watch(() => playerStore.customBackgroundBlur, value => { const safe = sanitizeBackgroundBlur(value); if (value !== safe) playerStore.customBackgroundBlur = safe; addChoiceValue(customBackgroundBlurValues, safe) }, { immediate: true })
-watch(() => playerStore.customBackgroundBrightness, value => { const safe = sanitizeBackgroundBrightness(value); if (value !== safe) playerStore.customBackgroundBrightness = safe; addChoiceValue(customBackgroundBrightnessValues, safe) }, { immediate: true })
-watch(() => playerStore.customBackgroundMode, value => { if (!customBackgroundModeOptions.some(o => o.value === value)) playerStore.customBackgroundMode = customBackgroundDefaults.mode }, { immediate: true })
-watch(() => playerStore.customBackgroundApplyToPlayer, value => { if (typeof value !== 'boolean') playerStore.customBackgroundApplyToPlayer = customBackgroundDefaults.applyToPlayer }, { immediate: true })
-watch(() => playerStore.customBackgroundApplyToChrome, value => { if (typeof value !== 'boolean') playerStore.customBackgroundApplyToChrome = customBackgroundDefaults.applyToChrome }, { immediate: true })
-
 const setLyricVisualizer = () => {
     if (!playerStore.lyricVisualizer) dialogOpen('确定开启', '开启后此功能会消耗一定性能且可能造成卡顿，确定开启吗？', flag => { if (flag) playerStore.lyricVisualizer = !playerStore.lyricVisualizer })
     else playerStore.lyricVisualizer = false
@@ -636,16 +638,12 @@ const toggleCustomBackground = () => { playerStore.customBackgroundEnabled = !pl
 const toggleCustomBackgroundApplyToPlayer = () => { playerStore.customBackgroundApplyToPlayer = !playerStore.customBackgroundApplyToPlayer }
 const toggleCustomBackgroundApplyToChrome = () => { playerStore.customBackgroundApplyToChrome = !playerStore.customBackgroundApplyToChrome }
 const chooseCustomBackgroundImage = () => {
-    const api = (window.electronAPI && window.electronAPI.openImageFile) ? window.electronAPI.openImageFile : (windowApi && windowApi.openImageFile)
-    if (!api) return
-    api().then(path => { if (path) playerStore.customBackgroundImage = path })
+    windowApi.openImageFile().then(path => { if (path) playerStore.customBackgroundImage = path })
 }
 const clearCustomBackgroundImage = () => { playerStore.customBackgroundImage = '' }
 
-
 onBeforeRouteLeave((to, from, next) => {
-    const snapshot = setAppSettings()
-    initSettings({ settings: snapshot, hydrateLocalMusic: true })
+    saveSettings()
     next()
     noticeOpen('设置已保存', 2)
 })
@@ -656,11 +654,12 @@ const routerChange = () => {
 
 const openDirectoryPicker = async () => {
     try {
-        if (!windowApi || typeof windowApi.openFile !== 'function') {
+        const openDirectory = windowApi?.openDirectory || windowApi?.openFile
+        if (typeof openDirectory !== 'function') {
             noticeOpen('目录选择器不可用', 2)
             return null
         }
-        return await windowApi.openFile()
+        return await openDirectory()
     } catch (error) {
         console.error('打开目录选择器失败:', error)
         noticeOpen('打开目录选择器失败', 2)
@@ -781,31 +780,23 @@ const clearMusicVideo = () => {
         else noticeOpen('删除失败', 3)
     })
 }
-const setMusicVideo = async () => {
-    if (!playerStore.musicVideo) {
-        dialogOpen('确定开启', '开启后此功能会消耗一定性能且可能造成卡顿，确定开启吗？', openMusicVideo)
+const togglePlayerFlag = key => {
+    playerStore[key] = !playerStore[key]
+}
+const setConfirmedPlayerFlag = (key, message) => {
+    if (playerStore[key]) {
+        togglePlayerFlag(key)
         return
     }
-    openMusicVideo(true)
+    dialogOpen('确定开启', message, flag => {
+        if (flag) togglePlayerFlag(key)
+    })
 }
-const openMusicVideo = flag => {
-    if (flag) playerStore.musicVideo = !playerStore.musicVideo
-}
-const setLyricBlur = () => {
-    if (!playerStore.lyricBlur) dialogOpen('确定开启', '开启后此功能会消耗一定性能且可能造成卡顿，确定开启吗？', openLyricBlur)
-    else openLyricBlur(true)
-}
-const openLyricBlur = flag => {
-    if (flag) playerStore.lyricBlur = !playerStore.lyricBlur
-}
-
-const setCoverBlur = () => {
-    if (!playerStore.coverBlur) dialogOpen('确定开启', '开启后此功能会消耗一定性能且可能造成卡顿，确定开启吗？', openCoverBlur)
-    else openCoverBlur(true)
-}
-const openCoverBlur = flag => {
-    if (flag) playerStore.coverBlur = !playerStore.coverBlur
-}
+const setMusicVideo = () => setConfirmedPlayerFlag('musicVideo', PERFORMANCE_CONFIRM_MESSAGE)
+const setLyricBlur = () => setConfirmedPlayerFlag('lyricBlur', PERFORMANCE_CONFIRM_MESSAGE)
+const setCoverBlur = () => setConfirmedPlayerFlag('coverBlur', PERFORMANCE_CONFIRM_MESSAGE)
+const setGaplessPlayback = () => setConfirmedPlayerFlag('gaplessPlayback', GAPLESS_CONFIRM_MESSAGE)
+const setAudioVisualizer = () => setConfirmedPlayerFlag('audioVisualizer', PERFORMANCE_CONFIRM_MESSAGE)
 const userLogout = async () => {
     if (!isLogin()) {
         noticeOpen('您已退出账号', 2)
@@ -818,8 +809,8 @@ const userLogout = async () => {
 }
 const save = () => {
     selectedShortcut.value = null
-    setAppSettings()
-    initSettings()
+    setCustomFont()
+    saveSettings()
     noticeOpen('设置已保存', 2)
 }
 const toGithub = () => {
@@ -955,6 +946,28 @@ const clearFmRecent = () => {
                                 </div>
                             </div>
                         </div>
+                        <div class="option">
+                            <div class="option-name">歌曲无缝衔接</div>
+                            <div class="option-operation">
+                                <div class="toggle" @click="setGaplessPlayback()">
+                                    <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.gaplessPlayback }">{{ playerStore.gaplessPlayback ? '已开启' : '已关闭' }}</div>
+                                    <Transition name="toggle">
+                                        <div class="toggle-on" v-show="playerStore.gaplessPlayback"></div>
+                                    </Transition>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="option">
+                            <div class="option-name">音频可视化</div>
+                            <div class="option-operation">
+                                <div class="toggle" @click="setAudioVisualizer()">
+                                    <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.audioVisualizer }">{{ playerStore.audioVisualizer ? '已开启' : '已关闭' }}</div>
+                                    <Transition name="toggle">
+                                        <div class="toggle-on" v-show="playerStore.audioVisualizer"></div>
+                                    </Transition>
+                                </div>
+                            </div>
+                        </div>
                         <!-- 自定义背景 -->
                         <div class="option">
                             <div class="option-name">开启自定义背景</div>
@@ -1064,66 +1077,6 @@ const clearFmRecent = () => {
                                 <div class="option-reset" @click="resetLyricVisualizerStyle">重置</div>
                             </div>
                         </div>
-                        <div class="option" v-if="playerStore.lyricVisualizer && playerStore.lyricVisualizerStyle === 'radial'">
-                            <div class="option-name">圆环大小</div>
-                            <div class="option-operation option-operation--selector">
-                                <div class="selector-wrapper">
-                                    <Selector v-model="playerStore.lyricVisualizerRadialSize" :options="lyricVisualizerRadialSizeOptions" />
-                                </div>
-                                <div class="option-add-group">
-                                    <input type="number" min="10" v-model="lyricVisualizerRadialSizeCustom" @keyup.enter="addLyricVisualizerRadialSizeOption" />
-                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerRadialSizeAction.mode === 'remove' }" @click="addLyricVisualizerRadialSizeOption">
-                                        {{ lyricVisualizerRadialSizeAction.mode === 'remove' ? '删除' : '添加' }}
-                                    </div>
-                                </div>
-                                <div class="option-reset" @click="resetLyricVisualizerRadialSize">重置</div>
-                            </div>
-                        </div>
-                        <div class="option" v-if="playerStore.lyricVisualizer && playerStore.lyricVisualizerStyle === 'radial'">
-                            <div class="option-name">中心圆尺寸</div>
-                            <div class="option-operation option-operation--selector">
-                                <div class="selector-wrapper">
-                                    <Selector v-model="playerStore.lyricVisualizerRadialCoreSize" :options="lyricVisualizerRadialCoreSizeOptions" />
-                                </div>
-                                <div class="option-add-group">
-                                    <input type="number" min="10" max="95" v-model="lyricVisualizerRadialCoreSizeCustom" @keyup.enter="addLyricVisualizerRadialCoreSizeOption" />
-                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerRadialCoreSizeAction.mode === 'remove' }" @click="addLyricVisualizerRadialCoreSizeOption">
-                                        {{ lyricVisualizerRadialCoreSizeAction.mode === 'remove' ? '删除' : '添加' }}
-                                    </div>
-                                </div>
-                                <div class="option-reset" @click="resetLyricVisualizerRadialCoreSize">重置</div>
-                            </div>
-                        </div>
-                        <div class="option" v-if="playerStore.lyricVisualizer && playerStore.lyricVisualizerStyle === 'radial'">
-                            <div class="option-name">X轴偏移</div>
-                            <div class="option-operation option-operation--selector">
-                                <div class="selector-wrapper">
-                                    <Selector v-model="playerStore.lyricVisualizerRadialOffsetX" :options="lyricVisualizerRadialOffsetXOptions" />
-                                </div>
-                                <div class="option-add-group">
-                                    <input type="number" v-model="lyricVisualizerRadialOffsetXCustom" @keyup.enter="addLyricVisualizerRadialOffsetXOption" />
-                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerRadialOffsetXAction.mode === 'remove' }" @click="addLyricVisualizerRadialOffsetXOption">
-                                        {{ lyricVisualizerRadialOffsetXAction.mode === 'remove' ? '删除' : '添加' }}
-                                    </div>
-                                </div>
-                                <div class="option-reset" @click="resetLyricVisualizerRadialOffsetX">重置</div>
-                            </div>
-                        </div>
-                        <div class="option" v-if="playerStore.lyricVisualizer && playerStore.lyricVisualizerStyle === 'radial'">
-                            <div class="option-name">Y轴偏移</div>
-                            <div class="option-operation option-operation--selector">
-                                <div class="selector-wrapper">
-                                    <Selector v-model="playerStore.lyricVisualizerRadialOffsetY" :options="lyricVisualizerRadialOffsetYOptions" />
-                                </div>
-                                <div class="option-add-group">
-                                    <input type="number" v-model="lyricVisualizerRadialOffsetYCustom" @keyup.enter="addLyricVisualizerRadialOffsetYOption" />
-                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerRadialOffsetYAction.mode === 'remove' }" @click="addLyricVisualizerRadialOffsetYOption">
-                                        {{ lyricVisualizerRadialOffsetYAction.mode === 'remove' ? '删除' : '添加' }}
-                                    </div>
-                                </div>
-                                <div class="option-reset" @click="resetLyricVisualizerRadialOffsetY">重置</div>
-                            </div>
-                        </div>
                         <div class="option" v-if="playerStore.lyricVisualizer">
                             <div class="option-name">可视化高度</div>
                             <div class="option-operation option-operation--selector">
@@ -1170,38 +1123,15 @@ const clearFmRecent = () => {
                             </div>
                         </div>
                         <div class="option" v-if="playerStore.lyricVisualizer">
-                            <div class="option-name">频率范围</div>
-                            <div class="option-operation option-operation--range">
-                                <div class="option-group">
-                                    <span class="option-group-label">最低</span>
-                                    <div class="selector-wrapper">
-                                        <Selector v-model="playerStore.lyricVisualizerFrequencyMin" :options="lyricVisualizerFrequencyMinOptions" />
-                                    </div>
-                                    <div class="option-add-group">
-                                        <input type="number" min="20" v-model="lyricVisualizerFrequencyMinCustom" @keyup.enter="addLyricVisualizerFrequencyMinOption" />
-                                        <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerFrequencyMinAction.mode === 'remove' }" @click="addLyricVisualizerFrequencyMinOption">
-                                            {{ lyricVisualizerFrequencyMinAction.mode === 'remove' ? '删除' : '添加' }}
-                                        </div>
-                                    </div>
-                                    <div class="option-reset" @click="resetLyricVisualizerFrequencyMin">重置</div>
-                                </div>
-                                <div class="option-group">
-                                    <span class="option-group-label">最高</span>
-                                    <div class="selector-wrapper">
-                                        <Selector v-model="playerStore.lyricVisualizerFrequencyMax" :options="lyricVisualizerFrequencyMaxOptions" />
-                                    </div>
-                                    <div class="option-add-group">
-                                        <input type="number" min="20" v-model="lyricVisualizerFrequencyMaxCustom" @keyup.enter="addLyricVisualizerFrequencyMaxOption" />
-                                        <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerFrequencyMaxAction.mode === 'remove' }" @click="addLyricVisualizerFrequencyMaxOption">
-                                            {{ lyricVisualizerFrequencyMaxAction.mode === 'remove' ? '删除' : '添加' }}
-                                        </div>
-                                    </div>
-                                    <div class="option-reset" @click="resetLyricVisualizerFrequencyMax">重置</div>
+                            <div class="option-name">颜色</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerColor" :options="lyricVisualizerColorOptions" />
                                 </div>
                             </div>
                         </div>
                         <div class="option" v-if="playerStore.lyricVisualizer">
-                            <div class="option-name">可视化透明度</div>
+                            <div class="option-name">透明度</div>
                             <div class="option-operation option-operation--selector">
                                 <div class="selector-wrapper">
                                     <Selector v-model="playerStore.lyricVisualizerOpacity" :options="lyricVisualizerOpacityOptions" />
@@ -1216,21 +1146,13 @@ const clearFmRecent = () => {
                             </div>
                         </div>
                         <div class="option" v-if="playerStore.lyricVisualizer">
-                            <div class="option-name">可视化颜色</div>
-                            <div class="option-operation option-operation--selector">
-                                <div class="selector-wrapper">
-                                    <Selector v-model="playerStore.lyricVisualizerColor" :options="lyricVisualizerColorOptions" />
-                                </div>
-                            </div>
-                        </div>
-                        <div class="option" v-if="playerStore.lyricVisualizer">
                             <div class="option-name">过渡延迟</div>
                             <div class="option-operation option-operation--selector">
                                 <div class="selector-wrapper">
                                     <Selector v-model="playerStore.lyricVisualizerTransitionDelay" :options="lyricVisualizerTransitionDelayOptions" />
                                 </div>
                                 <div class="option-add-group">
-                                    <input type="number" step="0.01" min="0" max="0.95" v-model="lyricVisualizerTransitionDelayCustom" @keyup.enter="addLyricVisualizerTransitionDelayOption" />
+                                    <input type="number" step="0.05" min="0" max="0.95" v-model="lyricVisualizerTransitionDelayCustom" @keyup.enter="addLyricVisualizerTransitionDelayOption" />
                                     <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerTransitionDelayAction.mode === 'remove' }" @click="addLyricVisualizerTransitionDelayOption">
                                         {{ lyricVisualizerTransitionDelayAction.mode === 'remove' ? '删除' : '添加' }}
                                     </div>
@@ -1238,22 +1160,40 @@ const clearFmRecent = () => {
                                 <div class="option-reset" @click="resetLyricVisualizerTransitionDelay">重置</div>
                             </div>
                         </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer">
+                            <div class="option-name">最低频率</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerFrequencyMin" :options="lyricVisualizerFrequencyMinOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" min="20" max="20000" v-model="lyricVisualizerFrequencyMinCustom" @keyup.enter="addLyricVisualizerFrequencyMinOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerFrequencyMinAction.mode === 'remove' }" @click="addLyricVisualizerFrequencyMinOption">
+                                        {{ lyricVisualizerFrequencyMinAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerFrequencyMin">重置</div>
+                            </div>
+                        </div>
+                        <div class="option" v-if="playerStore.lyricVisualizer">
+                            <div class="option-name">最高频率</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="playerStore.lyricVisualizerFrequencyMax" :options="lyricVisualizerFrequencyMaxOptions" />
+                                </div>
+                                <div class="option-add-group">
+                                    <input type="number" min="20" max="20000" v-model="lyricVisualizerFrequencyMaxCustom" @keyup.enter="addLyricVisualizerFrequencyMaxOption" />
+                                    <div class="option-add" :class="{ 'option-add--remove': lyricVisualizerFrequencyMaxAction.mode === 'remove' }" @click="addLyricVisualizerFrequencyMaxOption">
+                                        {{ lyricVisualizerFrequencyMaxAction.mode === 'remove' ? '删除' : '添加' }}
+                                    </div>
+                                </div>
+                                <div class="option-reset" @click="resetLyricVisualizerFrequencyMax">重置</div>
+                            </div>
+                        </div>
                         <div class="option">
                             <div class="option-name">搜索下拉条目数量</div>
                             <div class="option-operation">
                                 <input v-model="searchAssistLimit" name="searchAssistLimit" />
-                            </div>
-                        </div>
-                        <div class="option">
-                            <div class="option-name">全局缩放</div>
-                            <div class="option-operation">
-                                <Selector v-model="globalZoom" :options="globalZoomOptions" />
-                            </div>
-                        </div>
-                        <div class="option">
-                            <div class="option-name">评论区字体大小</div>
-                            <div class="option-operation">
-                                <input v-model="commentFontSize" name="commentFontSize" />
                             </div>
                         </div>
                         <div class="option">
@@ -1306,7 +1246,7 @@ const clearFmRecent = () => {
                         <div class="option" v-if="playerStore.musicVideo">
                             <div class="option-name">音乐视频缓存</div>
                             <div class="select-download-folder">
-                                <div class="selected-folder" :title="downloadFolder">{{ videoFolder ? videoFolder : '待选择' }}</div>
+                                <div class="selected-folder" :title="videoFolder">{{ videoFolder ? videoFolder : '待选择' }}</div>
                                 <div class="select-option" @click="selectFolder('video')">选择</div>
                             </div>
                         </div>
@@ -1402,6 +1342,18 @@ const clearFmRecent = () => {
                             </div>
                         </div>
                         <div class="option">
+                            <div class="option-name">自定义字体</div>
+                            <div class="option-operation">
+                                <FontSelector
+                                    v-model="customFont"
+                                    :options="fontOptions"
+                                    :loading="systemFontsLoading"
+                                    @open="loadSystemFonts"
+                                    @change="setCustomFont"
+                                ></FontSelector>
+                            </div>
+                        </div>
+                        <div class="option">
                             <div class="option-name">开启首页页面</div>
                             <div class="option-operation">
                                 <div class="toggle" @click="userStore.homePage = !userStore.homePage">
@@ -1457,6 +1409,20 @@ const clearFmRecent = () => {
                                 <Selector v-model="quitApp" :options="quitAppOptions"></Selector>
                             </div>
                         </div>
+                        <div class="option">
+                            <div class="option-name">全局缩放</div>
+                            <div class="option-operation option-operation--selector">
+                                <div class="selector-wrapper">
+                                    <Selector v-model="globalZoom" :options="globalZoomOptions" />
+                                </div>
+                            </div>
+                        </div>
+                        <div class="option">
+                            <div class="option-name">评论区字体大小</div>
+                            <div class="option-operation">
+                                <input type="number" min="8" max="32" v-model="commentFontSize" />
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1464,7 +1430,7 @@ const clearFmRecent = () => {
                 <div class="app-icon">
                     <img src="../assets/icon/icon.ico" alt="" />
                 </div>
-                <div class="version">V0.5.9</div>
+                <div class="version">V0.6.0</div>
                 <div class="update-check">
                     <button class="check-update-btn" @click="checkForUpdates">检查更新</button>
                 </div>

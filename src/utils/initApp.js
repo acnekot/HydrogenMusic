@@ -1,6 +1,3 @@
-import { loadLastSong, initPlayerExternalBridge } from './player'
-import { scanMusic } from './locaMusic'
-import { initDownloadManager } from './downloadManager'
 import { usePlayerStore } from '../store/playerStore'
 import { useLocalStore } from '../store/localStore'
 import { useUserStore } from '../store/userStore'
@@ -10,9 +7,15 @@ import { initializeCurrentAccountSession } from './accountSession'
 import { hasStoredBiliSession, migrateLegacyBiliSession } from './biliSession'
 import { migrateLegacyAuthSession } from './authority'
 import { getSettingsSnapshot, setCachedSettingsSnapshot } from './settingsSnapshot'
+import { initPlayerExternalBridge, loadLastSong } from './player/lazy'
+import { applyCustomFontStyle, syncDesktopLyricCustomFont } from './setFont'
+import { resolveSystemFontOptionAsync, resolveSystemFontValueAsync } from './fontResolver'
+import settingsSchema from '../shared/settingsSchema.js'
+
+const { normalizeSettings } = settingsSchema
 
 const playerStore = usePlayerStore()
-const { quality, lyricSize, tlyricSize, rlyricSize, lyricInterludeTime, searchAssistLimit, showSongTranslation, globalZoom, commentFontSize } = storeToRefs(playerStore)
+const { quality, lyricSize, tlyricSize, rlyricSize, lyricInterludeTime, searchAssistLimit, showSongTranslation, gaplessPlayback, audioVisualizer, globalZoom, commentFontSize } = storeToRefs(playerStore)
 const localStore = useLocalStore()
 const userStore = useUserStore()
 
@@ -22,11 +25,26 @@ let deferredInitScheduled = false
 let mediaSessionInitialized = false
 let sirenDurationPreloadScheduled = false
 let lastSongRestoreScheduled = false
+let localMusicModulePromise = null
+let downloadManagerModulePromise = null
+let customFontResolveToken = 0
 
-const normalizeSearchAssistLimit = value => {
-    const rawValue = Number.parseInt(value, 10)
-    if (!Number.isFinite(rawValue)) return 8
-    return Math.max(1, rawValue)
+function loadLocalMusicModule() {
+    if (!localMusicModulePromise) localMusicModulePromise = import('./locaMusic')
+    return localMusicModulePromise
+}
+
+function loadDownloadManagerModule() {
+    if (!downloadManagerModulePromise) downloadManagerModulePromise = import('./downloadManager')
+    return downloadManagerModulePromise
+}
+
+function scanMusicDeferred(options) {
+    void loadLocalMusicModule()
+        .then(({ scanMusic }) => scanMusic(options))
+        .catch(error => {
+            console.error('本地音乐扫描模块加载失败:', error)
+        })
 }
 
 const idle = typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function'
@@ -54,7 +72,7 @@ function applyLocalSettings(settings, { hydrateLocalMusic = false } = {}) {
         }
         windowApi.clearLocalMusicData('downloaded')
     } else if (hydrateLocalMusic && nextDownloadFolder && !localStore.downloadedMusicFolder) {
-        scanMusic({ type: 'downloaded', refresh: false })
+        scanMusicDeferred({ type: 'downloaded', refresh: false })
     }
 
     if (nextLocalFolders.length === 0 && localStore.localMusicFolder) {
@@ -73,34 +91,93 @@ function applyLocalSettings(settings, { hydrateLocalMusic = false } = {}) {
         }
         windowApi.clearLocalMusicData('local')
     } else if (hydrateLocalMusic && nextLocalFolders.length !== 0 && !localStore.localMusicFolder) {
-        scanMusic({ type: 'local', refresh: false })
+        scanMusicDeferred({ type: 'local', refresh: false })
     }
 }
 
 export function applySettingsSnapshot(settings, options = {}) {
     if (!settings) return null
 
-    const normalizedSettings = setCachedSettingsSnapshot(settings)
+    const normalizedSettings = setCachedSettingsSnapshot(normalizeSettings(settings))
     quality.value = getPreferredQuality(normalizedSettings?.music?.level)
     lyricSize.value = normalizedSettings?.music?.lyricSize
     tlyricSize.value = normalizedSettings?.music?.tlyricSize
     rlyricSize.value = normalizedSettings?.music?.rlyricSize
     lyricInterludeTime.value = normalizedSettings?.music?.lyricInterlude
-    searchAssistLimit.value = normalizeSearchAssistLimit(normalizedSettings?.music?.searchAssistLimit)
+    searchAssistLimit.value = normalizedSettings?.music?.searchAssistLimit
     showSongTranslation.value = normalizedSettings?.music?.showSongTranslation !== false
+    gaplessPlayback.value = normalizedSettings?.music?.gaplessPlayback === true
+    audioVisualizer.value = normalizedSettings?.music?.audioVisualizer === true
 
     const zoom = Number(normalizedSettings?.other?.globalZoom)
     if (Number.isFinite(zoom) && zoom > 0) {
         globalZoom.value = zoom
-        windowApi.setZoom(zoom)
+        if (typeof windowApi !== 'undefined' && windowApi?.setZoom) windowApi.setZoom(zoom)
     }
     const cfSize = Number(normalizedSettings?.music?.commentFontSize)
     if (Number.isFinite(cfSize) && cfSize > 0) {
         commentFontSize.value = cfSize
     }
 
+    applyCustomFontSetting(normalizedSettings)
+
     applyLocalSettings(normalizedSettings, options)
     return normalizedSettings
+}
+
+function persistResolvedCustomFont(settings, resolvedCustomFont, resolvedCustomFontLabel = '') {
+    if (!settings || !resolvedCustomFont) return
+
+    const previousOther = settings.other || {}
+    const previousCustomFont = previousOther.customFont || ''
+    const previousCustomFontLabel = previousOther.customFontLabel || ''
+    const customFontLabel = resolvedCustomFontLabel || previousCustomFontLabel || previousCustomFont
+    if (
+        previousCustomFont === resolvedCustomFont
+        && previousCustomFontLabel === customFontLabel
+    ) return
+
+    const nextSettings = normalizeSettings({
+        ...settings,
+        other: {
+            ...previousOther,
+            customFont: resolvedCustomFont,
+            customFontLabel,
+        },
+    })
+
+    setCachedSettingsSnapshot(nextSettings)
+    try {
+        if (typeof windowApi !== 'undefined') windowApi?.setSettings?.(JSON.stringify(nextSettings))
+    } catch (_) {}
+}
+
+function applyCustomFontSetting(settings) {
+    const customFont = settings?.other?.customFont
+    const customFontLabel = settings?.other?.customFontLabel || ''
+    const insertedFont = applyCustomFontStyle(customFont, customFontLabel)
+    const token = ++customFontResolveToken
+
+    if (!insertedFont) {
+        syncDesktopLyricCustomFont('', '')
+        return
+    }
+
+    const needsDisplayLabelResolve = !customFontLabel || customFontLabel === insertedFont
+    const resolveFont = needsDisplayLabelResolve
+        ? resolveSystemFontOptionAsync(insertedFont, customFontLabel || insertedFont)
+        : resolveSystemFontValueAsync(insertedFont).then(value => ({ value, label: customFontLabel }))
+
+    void resolveFont
+        .then(({ value: resolvedFont, label: resolvedFontLabel }) => {
+            if (token !== customFontResolveToken) return
+            if (!resolvedFont) return
+
+            applyCustomFontStyle(resolvedFont, resolvedFontLabel)
+            syncDesktopLyricCustomFont(resolvedFont, resolvedFontLabel)
+            persistResolvedCustomFont(settings, resolvedFont, resolvedFontLabel)
+        })
+        .catch(() => {})
 }
 
 export async function initSettings(options = {}) {
@@ -112,7 +189,10 @@ export async function initSettings(options = {}) {
 function restoreLastSongOnce() {
     if (lastSongRestoreScheduled) return
     lastSongRestoreScheduled = true
-    loadLastSong()
+    void loadLastSong().catch(error => {
+        lastSongRestoreScheduled = false
+        console.error('恢复上次播放失败:', error)
+    })
 }
 
 function resetStartupPlayerState() {
@@ -160,7 +240,8 @@ async function runBaseAppInit() {
         userStore.clearBiliAccountState()
     }
 
-    initPlayerExternalBridge()
+    await initPlayerExternalBridge()
+    const { initDownloadManager } = await loadDownloadManagerModule()
     initDownloadManager()
     await initSettings({ hydrateLocalMusic: false })
     resetStartupPlayerState()

@@ -65,10 +65,11 @@
                 <div class="fm-content" v-if="currentSong && !loading">
                     <div class="fm-main">
                         <div class="fm-cover-carousel">
-                            <TransitionGroup :name="coverTransitionName" :css="!modeSwitching" tag="div" class="fm-cover-track">
+                            <TransitionGroup ref="coverTrackRef" :name="coverTransitionName" :css="!modeSwitching" tag="div" class="fm-cover-track">
                                 <div
                                     v-for="item in coverTrackItems"
                                     :key="item.key"
+                                    :data-cover-key="item.key"
                                     class="fm-cover-slot"
                                     :class="[
                                         `slot-${item.role}`,
@@ -82,7 +83,7 @@
                                     @click="handleCoverSlotClick(item)"
                                 >
                                     <template v-if="item.song && !item.isPlaceholder">
-                                        <img :src="getFmSongCover(item.song) || '/src/assets/default-cover.png'" :alt="item.song.name || 'FM Cover'" />
+                                        <img :src="getFmSongCover(item.song, 512) || '/src/assets/default-cover.png'" :alt="item.song.name || 'FM Cover'" />
                                         <div v-if="item.role === 'center'" class="fm-play-overlay">
                                             <svg v-if="!isPlaying" width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
                                                 <path d="M8 5v14l11-7z" />
@@ -166,37 +167,30 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, onActivated, onDeactivated, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, onActivated, onDeactivated, computed, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { getPersonalFM, getPersonalFMByMode, fmTrash, getLyric, likeMusic } from '../api/song'
+import { getPersonalFM, getPersonalFMByMode, fmTrash, getLyric } from '../api/song'
 import { getRecommendSongs } from '../api/playlist'
 import { usePlayerStore } from '../store/playerStore'
 import { useUserStore } from '../store/userStore'
-import { useLibraryStore } from '../store/libraryStore'
-import { noticeOpen } from '../utils/dialog'
 import { mapSongsPlayableStatus } from '../utils/songStatus'
 import {
-    applyOptimisticLikeState,
-    createLikeActionToken,
-    getFavoritePlaylistNoticeText,
-    getLikeActionErrorMessage,
-    isActiveLikeActionToken,
+    likeSong as likePlayerSong,
     play,
-    queueLikeRequest,
+    preloadGaplessSongPlayback,
     setSongLevel,
-    syncLikelistAfterLikeAction,
-    updateFavoritePlaylistTrack,
-} from '../utils/player'
-import { schedulePlaylistCacheInvalidation } from '../utils/cacheInvalidation'
+} from '../utils/player/lazy'
 import { storeToRefs } from 'pinia'
 import { getPreferredQuality } from '../utils/quality'
 import { resolveTrackByQualityPreference } from '../utils/musicUrlResolver'
 import { getSongDisplayName } from '../utils/songName'
+import { getPrefetchedSongAssets, hydrateRemoteSongMetadata, prefetchSongAssetList } from '../utils/player/assetPrefetch'
+import { createEmptyLyric } from '../utils/player/lyricPayload'
+import { getSongCoverUrl, withCoverParam } from '../utils/coverBackdrop'
 
 const router = useRouter()
 const playerStore = usePlayerStore()
 const userStore = useUserStore()
-const libraryStore = useLibraryStore()
 const { songId, playing, quality, showSongTranslation } = storeToRefs(playerStore)
 const { likelist } = storeToRefs(userStore)
 
@@ -262,23 +256,39 @@ function safeParseArray(raw) {
     }
 }
 
+function isBlankValue(value) {
+    return value == null || value === ''
+}
+
+function firstPresentValue(...values) {
+    return values.find(value => !isBlankValue(value)) ?? null
+}
+
 function normalizeSongId(id) {
-    if (id === null || id === undefined || id === '') return null
+    if (isBlankValue(id)) return null
     return String(id)
+}
+
+function getActiveFmPlaybackId() {
+    if (playerStore.listInfo?.type !== 'personalfm') return null
+    return normalizeSongId(playerStore.songId)
+}
+
+function isActiveFmPlaybackSongId(id) {
+    const normalizedId = normalizeSongId(id)
+    const activeId = getActiveFmPlaybackId()
+    return !!normalizedId && !!activeId && normalizedId === activeId
+}
+
+function isBlockedFmPoolSongId(id) {
+    const normalizedId = normalizeSongId(id)
+    return !!normalizedId && (recentPlayedSet.has(normalizedId) || isActiveFmPlaybackSongId(normalizedId))
 }
 
 function getPrimarySongId(song) {
     if (!song || typeof song != 'object') return null
-    if (song.id !== undefined && song.id !== null && song.id !== '') return song.id
-    if (song.songId !== undefined && song.songId !== null && song.songId !== '') return song.songId
-    if (song.trackId !== undefined && song.trackId !== null && song.trackId !== '') return song.trackId
-    const nestedSong = song.song
-    if (nestedSong && typeof nestedSong == 'object') {
-        if (nestedSong.id !== undefined && nestedSong.id !== null && nestedSong.id !== '') return nestedSong.id
-        if (nestedSong.songId !== undefined && nestedSong.songId !== null && nestedSong.songId !== '') return nestedSong.songId
-        if (nestedSong.trackId !== undefined && nestedSong.trackId !== null && nestedSong.trackId !== '') return nestedSong.trackId
-    }
-    return null
+    const nestedSong = song.song && typeof song.song == 'object' ? song.song : null
+    return firstPresentValue(song.id, song.songId, song.trackId, nestedSong?.id, nestedSong?.songId, nestedSong?.trackId)
 }
 
 function getFmSongArtists(song) {
@@ -309,22 +319,10 @@ function getFmSongAlbum(song) {
     return null
 }
 
-function getFmSongCover(song) {
-    if (!song || typeof song != 'object') return null
-    if (song.coverUrl) return song.coverUrl
-    if (song.al?.picUrl) return song.al.picUrl
-    if (song.album?.picUrl) return song.album.picUrl
-    if (song.blurPicUrl) return song.blurPicUrl
-    if (song.img1v1Url) return song.img1v1Url
-    const nestedSong = song.song
-    if (nestedSong && typeof nestedSong == 'object') {
-        if (nestedSong.coverUrl) return nestedSong.coverUrl
-        if (nestedSong.al?.picUrl) return nestedSong.al.picUrl
-        if (nestedSong.album?.picUrl) return nestedSong.album.picUrl
-        if (nestedSong.blurPicUrl) return nestedSong.blurPicUrl
-        if (nestedSong.img1v1Url) return nestedSong.img1v1Url
-    }
-    return null
+function getFmSongCover(song, size = null) {
+    const coverUrl = getSongCoverUrl(song)
+    if (!coverUrl) return null
+    return size ? withCoverParam(coverUrl, size) : coverUrl
 }
 
 function getFmSongArtistsText(song) {
@@ -340,16 +338,12 @@ function getFmSongAlbumName(song) {
 
 function getArtistId(artist) {
     if (!artist || typeof artist != 'object') return null
-    if (artist.id !== undefined && artist.id !== null && artist.id !== '') return artist.id
-    if (artist.artistId !== undefined && artist.artistId !== null && artist.artistId !== '') return artist.artistId
-    return null
+    return firstPresentValue(artist.id, artist.artistId)
 }
 
 function getAlbumId(album) {
     if (!album || typeof album != 'object') return null
-    if (album.id !== undefined && album.id !== null && album.id !== '') return album.id
-    if (album.albumId !== undefined && album.albumId !== null && album.albumId !== '') return album.albumId
-    return null
+    return firstPresentValue(album.id, album.albumId)
 }
 
 function canOpenArtist(artist) {
@@ -385,8 +379,6 @@ function normalizeFmSong(song) {
     const rawAlbum = getFmSongAlbum(song)
     const album = rawAlbum && typeof rawAlbum == 'object' ? { ...rawAlbum } : {}
     const coverUrl = getFmSongCover(song)
-
-    if (coverUrl && !album.picUrl) album.picUrl = coverUrl
 
     const parsedDuration = Number(song.dt ?? song.duration ?? song.song?.dt ?? song.song?.duration ?? 0)
     const duration = Number.isFinite(parsedDuration) && parsedDuration > 0 ? parsedDuration : 0
@@ -459,17 +451,18 @@ function addToFmPoolUnique(songs, source = FM_REFRESH_SOURCE.PERSONAL_FM) {
             input: 0,
             added: 0,
             filteredByRecent: 0,
+            filteredByActive: 0,
             filteredByPool: 0,
             invalid: 0,
             poolBefore: fmSongs.value.length,
             poolAfter: fmSongs.value.length,
         }
-        console.log('[FM Dedup]', emptyStats)
         return emptyStats
     }
     const before = fmSongs.value.length
     const deduped = []
     let filteredByRecent = 0
+    let filteredByActive = 0
     let filteredByPool = 0
     let invalid = 0
     for (const s of songs) {
@@ -482,6 +475,10 @@ function addToFmPoolUnique(songs, source = FM_REFRESH_SOURCE.PERSONAL_FM) {
         // 过滤：近期播放过、池中已有 → 不再加入
         if (recentPlayedSet.has(id)) {
             filteredByRecent++
+            continue
+        }
+        if (isActiveFmPlaybackSongId(id)) {
+            filteredByActive++
             continue
         }
         if (fmPoolIds.has(id)) {
@@ -497,12 +494,12 @@ function addToFmPoolUnique(songs, source = FM_REFRESH_SOURCE.PERSONAL_FM) {
         input: songs.length,
         added: deduped.length,
         filteredByRecent,
+        filteredByActive,
         filteredByPool,
         invalid,
         poolBefore: before,
         poolAfter: fmSongs.value.length,
     }
-    console.log('[FM Dedup]', stats)
     return stats
 }
 
@@ -512,7 +509,7 @@ function takeNextFromPool() {
         const id = normalizeSongId(s && s.id)
         if (id) fmPoolIds.delete(id)
         // 若近期播放过，则跳过，继续取下一首
-        if (id && recentPlayedSet.has(id)) continue
+        if (id && isBlockedFmPoolSongId(id)) continue
         return s || null
     }
     return null
@@ -525,7 +522,6 @@ function bootstrapFromPoolIfNeeded(source) {
     playedSongs.value.push(firstSong)
     rememberRecent(firstSong.id)
     currentIndex.value = 0
-    console.log(`[FM] Started with first ${source} song:`, firstSong.name)
     return true
 }
 const currentIndex = ref(0)
@@ -533,16 +529,20 @@ const loading = ref(false)
 const isPrefetching = ref(false)
 const isPanelIntroActive = ref(false)
 const isPanelOutlineReady = ref(false)
+const coverTrackRef = ref(null)
 const coverNavigating = ref(false)
+const coverPreparingNavigation = ref(false)
 const coverTransitionDirection = ref('neutral')
 const queuedDirection = ref(null)
 const COVER_TRANSITION_FALLBACK_MS = 2500
-const COVER_RELEASE_RATIO_FALLBACK = 0.45
 const COVER_RELEASE_MIN_MS = 180
 const COVER_RELEASE_BUFFER_MS = 16
 const PANEL_INTRO_DURATION_MS = 1500
 const PANEL_INTRO_BUFFER_MS = 40
 let fmRefreshToken = 0
+let coverNavigationToken = 0
+let nextCandidateLoadPromise = null
+let nextCandidateLoadShowsPending = false
 let coverReleaseTimer = null
 let panelIntroTimer = null
 let panelIntroFrame = null
@@ -550,11 +550,18 @@ let skipIntroOnNextActivated = true
 
 function getCurrentFmUserId() {
     const userId = userStore?.user?.userId
-    return userId === undefined || userId === null || userId === '' ? null : String(userId)
+    return isBlankValue(userId) ? null : String(userId)
 }
 
 function isActiveFmRefresh(token, userId) {
     return token === fmRefreshToken && getCurrentFmUserId() === userId
+}
+
+function cancelCoverTransitionState() {
+    clearCoverReleaseTimer()
+    coverNavigating.value = false
+    coverPreparingNavigation.value = false
+    coverNavigationToken += 1
 }
 
 function resetFmAccountState() {
@@ -570,8 +577,9 @@ function resetFmAccountState() {
     awaitingSceneSubmodePick.value = false
     lastRefreshSource.value = FM_REFRESH_SOURCE.PERSONAL_FM
     lastLoadedUserId.value = null
-    clearCoverReleaseTimer()
-    coverNavigating.value = false
+    cancelCoverTransitionState()
+    nextCandidateLoadPromise = null
+    nextCandidateLoadShowsPending = false
     queuedDirection.value = null
 }
 
@@ -594,11 +602,41 @@ const prevCandidateSong = computed(() => {
     return null
 })
 
+const isPlayableFmPoolSong = song => !isBlockedFmPoolSongId(song?.id)
+
+const getPlayableFmPoolSongs = () => fmSongs.value.filter(isPlayableFmPoolSong)
+
+const isFmPoolLow = () => getPlayableFmPoolSongs().length < 2
+
 const nextCandidateSong = computed(() => {
     const historyCandidate = playedSongs.value[currentIndex.value + 1]
     if (historyCandidate) return historyCandidate
-    return fmSongs.value[0] || null
+    return fmSongs.value.find(isPlayableFmPoolSong) || null
 })
+
+function getPrefetchedFmLyric(...songs) {
+    for (const song of songs) {
+        const assets = getPrefetchedSongAssets(song)
+        if (assets?.hasLyric && assets.lyric && typeof assets.lyric == 'object') return assets.lyric
+    }
+    return null
+}
+
+function scheduleNextCandidateAssetPrefetch() {
+    const poolCandidates = getPlayableFmPoolSongs().slice(0, 2)
+    const candidates = [currentSong.value, nextCandidateSong.value, ...poolCandidates].filter(Boolean)
+    if (candidates.length === 0) {
+        if (playerStore.gaplessPlayback) void preloadGaplessSongPlayback(null)
+        return
+    }
+    void prefetchSongAssetList(candidates, { quality: quality.value, limit: 3, immediate: true })
+    const gaplessCandidate = nextCandidateSong.value || poolCandidates[0] || null
+    if (playerStore.gaplessPlayback && gaplessCandidate) {
+        void preloadGaplessSongPlayback(gaplessCandidate, { quality: quality.value })
+    } else if (playerStore.gaplessPlayback) {
+        void preloadGaplessSongPlayback(null)
+    }
+}
 
 const rightPlaceholderText = computed(() => {
     return isPrefetching.value ? 'NEXT LOADING' : 'NO NEXT'
@@ -774,19 +812,177 @@ const getCoverTransitionDurationMs = () => {
     return durationMs
 }
 
-const getCoverReleaseDelayMs = () => {
-    const transitionDurationMs = getCoverTransitionDurationMs()
-    if (typeof window === 'undefined') return transitionDurationMs
-
-    const host = document.querySelector('.personal-fm')
-    const ratioValue = host ? window.getComputedStyle(host).getPropertyValue('--fm-cover-overlap-release-ratio') : ''
-    const ratio = Number.parseFloat((ratioValue || '').trim())
-
-    return Math.max(COVER_RELEASE_MIN_MS, transitionDurationMs)
-}
+const getCoverReleaseDelayMs = () => Math.max(COVER_RELEASE_MIN_MS, getCoverTransitionDurationMs())
 
 const queueCoverDirection = direction => {
     queuedDirection.value = direction
+}
+
+const isCoverTransitionBusy = () => coverNavigating.value || coverPreparingNavigation.value
+
+const getCoverTrackElement = () => coverTrackRef.value?.$el || coverTrackRef.value || null
+
+const getCoverSlotElements = () => {
+    const track = getCoverTrackElement()
+    if (!track || typeof track.querySelectorAll !== 'function') return []
+    return Array.from(track.querySelectorAll('.fm-cover-slot[data-cover-key]'))
+}
+
+const captureCoverLayout = () => {
+    const layout = new Map()
+    for (const element of getCoverSlotElements()) {
+        const key = element.dataset.coverKey
+        if (!key) continue
+        layout.set(key, {
+            left: element.offsetLeft,
+            top: element.offsetTop,
+        })
+    }
+    return layout
+}
+
+const animateCoverLayoutFrom = async previousLayout => {
+    if (!previousLayout || previousLayout.size === 0 || typeof window === 'undefined') return
+
+    await nextTick()
+
+    const movingElements = []
+    for (const element of getCoverSlotElements()) {
+        const key = element.dataset.coverKey
+        const previous = key ? previousLayout.get(key) : null
+        if (!previous) continue
+
+        const dx = previous.left - element.offsetLeft
+        const dy = previous.top - element.offsetTop
+        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue
+
+        element.style.transition = 'none'
+        element.style.transform = `translate3d(${dx}px, ${dy}px, 0)`
+        movingElements.push(element)
+    }
+
+    if (movingElements.length === 0) return
+
+    const track = getCoverTrackElement()
+    void track?.offsetHeight
+
+    window.requestAnimationFrame(() => {
+        const durationMs = getCoverTransitionDurationMs()
+        for (const element of movingElements) {
+            let cleaned = false
+            let timeoutId = null
+            const cleanup = () => {
+                if (cleaned) return
+                cleaned = true
+                if (timeoutId) window.clearTimeout(timeoutId)
+                element.removeEventListener('transitionend', handleTransitionEnd)
+                element.style.transition = ''
+                element.style.transform = ''
+            }
+            const handleTransitionEnd = event => {
+                if (event.target !== element || event.propertyName !== 'transform') return
+                cleanup()
+            }
+
+            element.addEventListener('transitionend', handleTransitionEnd)
+            timeoutId = window.setTimeout(cleanup, durationMs + 120)
+            element.style.transition = `transform var(--fm-cover-transition-duration) var(--fm-cover-transition-ease)`
+            element.style.transform = ''
+        }
+    })
+}
+
+const waitForCoverPaint = () =>
+    new Promise(resolve => {
+        if (typeof window === 'undefined') {
+            resolve()
+            return
+        }
+        window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(resolve)
+        })
+    })
+
+const requestFmPoolRefill = async ({ showPending = false, force = false } = {}) => {
+    if (loading.value) return false
+    if (!currentSong.value && playedSongs.value.length > 0) return false
+    if (!force && !isFmPoolLow()) return false
+
+    if (showPending) {
+        nextCandidateLoadShowsPending = true
+        isPrefetching.value = true
+    }
+
+    if (!nextCandidateLoadPromise) {
+        const pendingPromise = refreshFM({ silent: true }).finally(() => {
+            if (nextCandidateLoadPromise !== pendingPromise) return
+            nextCandidateLoadPromise = null
+            if (nextCandidateLoadShowsPending) isPrefetching.value = false
+            nextCandidateLoadShowsPending = false
+        })
+        nextCandidateLoadPromise = pendingPromise
+    }
+
+    await nextCandidateLoadPromise
+    return !!nextCandidateSong.value
+}
+
+const loadNextCandidateForCover = async () => {
+    if (nextCandidateSong.value) return true
+    const hasCandidate = await requestFmPoolRefill({ showPending: true, force: true })
+    await nextTick()
+    return hasCandidate || !!nextCandidateSong.value
+}
+
+const requestSpareNextCandidateForCover = async () => {
+    if (currentIndex.value < playedSongs.value.length - 1) return
+    if (!isFmPoolLow()) return
+    await requestFmPoolRefill({ force: true })
+}
+
+const prepareCoverShift = async (direction, token) => {
+    if (direction === 'next' && !(await loadNextCandidateForCover())) return false
+    if (token !== coverNavigationToken) return false
+    if (direction === 'next') {
+        await requestSpareNextCandidateForCover()
+    }
+    if (token !== coverNavigationToken) return false
+
+    setCoverTransitionDirection(direction)
+    await nextTick()
+    await waitForCoverPaint()
+    return token === coverNavigationToken
+}
+
+const startPassiveCoverShift = async direction => {
+    if (isCoverTransitionBusy()) return null
+
+    const token = ++coverNavigationToken
+    coverPreparingNavigation.value = true
+    clearCoverReleaseTimer()
+
+    const canShift = await prepareCoverShift(direction, token)
+    if (!canShift) {
+        if (token === coverNavigationToken) coverPreparingNavigation.value = false
+        return null
+    }
+
+    if (token !== coverNavigationToken) return null
+    coverPreparingNavigation.value = false
+    coverNavigating.value = true
+    return token
+}
+
+const runAfterCoverSettles = task => {
+    if (typeof task !== 'function') return
+    if (typeof window === 'undefined' || !isCoverTransitionBusy()) {
+        task()
+        return
+    }
+
+    window.setTimeout(() => {
+        runAfterCoverSettles(task)
+    }, getCoverReleaseDelayMs() + COVER_RELEASE_BUFFER_MS)
 }
 
 const clearCoverReleaseTimer = () => {
@@ -857,44 +1053,37 @@ const scheduleCoverRelease = () => {
 }
 
 const togglePlay = async () => {
-    console.log('togglePlay clicked!')
-    console.log('currentSong:', currentSong.value)
-
     if (!currentSong.value) {
-        console.log('No current song available')
         return
     }
 
     // 如果当前歌曲已经在播放，只需要切换播放状态
     if (songId.value === currentSong.value.id && playerStore.currentMusic) {
         if (playing.value) {
-            console.log('Pausing current FM song')
-            playerStore.currentMusic.pause()
+            playerStore.currentMusic.pause?.()
         } else {
-            console.log('Resuming current FM song')
-            playerStore.currentMusic.play()
+            playerStore.currentMusic.play?.()
         }
         return
     }
 
-    // 播放新的FM歌曲
-    console.log('Playing new FM song:', currentSong.value.name)
-
     try {
-        // 获取歌曲URL
-        console.log('Getting music URL for:', currentSong.value.id)
+        const sourceSong = currentSong.value
+        const targetSongId = sourceSong.id
+        const normalizedCurrentSong = normalizeFmSong(sourceSong)
+        if (!normalizedCurrentSong) {
+            console.error('Invalid current FM song shape:', sourceSong)
+            return
+        }
+        const metadataTask = hydrateRemoteSongMetadata(normalizedCurrentSong)
+
         const preferredQuality = getPreferredQuality(quality.value)
-        const trackInfo = await resolveTrackByQualityPreference(currentSong.value.id, preferredQuality)
-        console.log('Music URL response:', trackInfo)
+        const trackInfo = await resolveTrackByQualityPreference(targetSongId, preferredQuality)
+        if (currentSong.value?.id !== targetSongId) return
+
         if (trackInfo && trackInfo.url) {
             const musicUrl = trackInfo.url
-            const targetSongId = currentSong.value.id
-            console.log('Playing music from URL:', musicUrl)
-            const normalizedCurrentSong = normalizeFmSong(currentSong.value)
-            if (!normalizedCurrentSong) {
-                console.error('Invalid current FM song shape:', currentSong.value)
-                return
-            }
+            const prefetchedLyric = getPrefetchedFmLyric(normalizedCurrentSong, sourceSong)
 
             // 创建一个临时的单曲列表用于FM播放（不影响用户的真实播放列表）
             const fmSongList = [
@@ -905,7 +1094,7 @@ const togglePlay = async () => {
             ]
 
             // 设置播放器状态
-            playerStore.songId = currentSong.value.id
+            playerStore.songId = targetSongId
             playerStore.currentIndex = 0
             playerStore.songList = fmSongList
             playerStore.listInfo = {
@@ -916,22 +1105,37 @@ const togglePlay = async () => {
             playerStore.lyric = null
             playerStore.lyricsObjArr = null
             playerStore.currentLyricIndex = -1
-            setSongLevel(trackInfo.level, trackInfo)
+            void metadataTask.then(() => {
+                if (playerStore.songId !== targetSongId) return
+                Object.assign(sourceSong, normalizedCurrentSong, { type: 'fm' })
+                const activeSong = playerStore.songList?.[0]
+                if (activeSong?.id === targetSongId) {
+                    Object.assign(activeSong, normalizedCurrentSong, { type: 'fm' })
+                    try { window.dispatchEvent(new CustomEvent('mediaSession:updateArtwork')) } catch (_) {}
+                }
+            })
+            await setSongLevel(trackInfo.level, trackInfo)
 
             // 直接播放音乐
-            play(musicUrl, true)
+            await play(musicUrl, true)
 
-            // 获取歌词
-            try {
-                const lyricResponse = await getLyric(currentSong.value.id)
-                if (playerStore.songId === targetSongId && lyricResponse && lyricResponse.lrc) {
-                    playerStore.lyric = lyricResponse
+            if (prefetchedLyric) {
+                if (playerStore.songId === targetSongId) playerStore.lyric = prefetchedLyric
+            } else {
+                try {
+                    const lyricResponse = await getLyric(targetSongId)
+                    if (playerStore.songId === targetSongId) {
+                        playerStore.lyric = lyricResponse || createEmptyLyric()
+                    }
+                } catch (lyricError) {
+                    console.warn('Failed to load lyrics:', lyricError)
+                    if (playerStore.songId === targetSongId) {
+                        playerStore.lyric = createEmptyLyric()
+                    }
                 }
-            } catch (lyricError) {
-                console.warn('Failed to load lyrics:', lyricError)
             }
 
-            console.log('FM song started playing successfully')
+            runAfterCoverSettles(scheduleNextCandidateAssetPrefetch)
         } else {
             console.error('No valid music URL found')
         }
@@ -940,101 +1144,138 @@ const togglePlay = async () => {
     }
 }
 
-const nextSong = async () => {
-    // 如果有下一首已播放的歌曲，直接播放
-    if (currentIndex.value < playedSongs.value.length - 1) {
-        currentIndex.value++
-        if (currentSong.value) {
-            console.log('Playing next FM song from history:', currentSong.value.name)
-            await togglePlay()
-        }
-        return
-    }
+const startCurrentSongPlaybackAfterCoverPaint = async () => {
+    const targetSongId = normalizeSongId(currentSong.value?.id)
+    if (!targetSongId) return
 
-    // 如果没有下一首，需要获取新歌曲
+    await nextTick()
+    await waitForCoverPaint()
+
+    if (normalizeSongId(currentSong.value?.id) !== targetSongId) return
+    void togglePlay()
+}
+
+const commitCoverSongChange = (mutation, { previousLayout = captureCoverLayout(), startPlayback = true } = {}) => {
+    mutation()
+    void animateCoverLayoutFrom(previousLayout)
+    if (startPlayback) {
+        void startCurrentSongPlaybackAfterCoverPaint()
+    }
+}
+
+const refillFmPoolIfLow = () => {
+    if (!isFmPoolLow()) return
+    void requestFmPoolRefill({ showPending: !nextCandidateSong.value })
+}
+
+const playFmSongFromPool = async nextSongFromPool => {
+    if (!nextSongFromPool) return false
+
+    commitCoverSongChange(() => {
+        playedSongs.value.push(nextSongFromPool)
+        rememberRecent(nextSongFromPool.id)
+        currentIndex.value = playedSongs.value.length - 1
+    })
+
+    refillFmPoolIfLow()
+    return true
+}
+
+const playNextFmCandidate = async () => {
     if (fmSongs.value.length === 0) {
         await refreshFM({ silent: true })
     }
 
-    // 从未播放的歌曲中取下一首
     let nextSongFromPool = takeNextFromPool()
-    if (nextSongFromPool) {
-        // 添加到播放历史并记录近期去重
-        playedSongs.value.push(nextSongFromPool)
-        rememberRecent(nextSongFromPool.id)
-        currentIndex.value = playedSongs.value.length - 1
+    if (await playFmSongFromPool(nextSongFromPool)) return true
 
-        console.log('Playing new FM song:', nextSongFromPool.name)
-        await togglePlay()
-        // 低水位预取，保持池内始终有歌可播
-        if (fmSongs.value.length < 2) {
-            refreshFM({ silent: true })
+    if (fmSongs.value.length === 0) {
+        await refreshFM({ silent: true })
+        nextSongFromPool = takeNextFromPool()
+        return playFmSongFromPool(nextSongFromPool)
+    }
+
+    return false
+}
+
+const nextSong = async () => {
+    // 如果有下一首已播放的歌曲，直接播放
+    if (currentIndex.value < playedSongs.value.length - 1) {
+        commitCoverSongChange(() => {
+            currentIndex.value++
+        })
+        return
+    }
+
+    await playNextFmCandidate()
+}
+
+const prevSong = async () => {
+    if (currentIndex.value > 0) {
+        commitCoverSongChange(() => {
+            currentIndex.value--
+        })
+    }
+}
+
+const goNext = async () => {
+    if (isCoverTransitionBusy()) {
+        queueCoverDirection('next')
+        return
+    }
+
+    const token = ++coverNavigationToken
+    coverPreparingNavigation.value = true
+    clearCoverReleaseTimer()
+
+    try {
+        const canShift = await prepareCoverShift('next', token)
+        if (!canShift) return
+
+        coverPreparingNavigation.value = false
+        coverNavigating.value = true
+        await nextSong()
+        scheduleCoverRelease()
+    } finally {
+        if (token === coverNavigationToken) {
+            coverPreparingNavigation.value = false
         }
-    } else {
-        console.log('No more FM songs available')
-        // 如果歌曲池为空，尝试再次刷新
-        if (fmSongs.value.length === 0) {
-            await refreshFM({ silent: true })
-            // 再次尝试获取歌曲
-            nextSongFromPool = takeNextFromPool()
-            if (nextSongFromPool) {
-                playedSongs.value.push(nextSongFromPool)
-                rememberRecent(nextSongFromPool.id)
-                currentIndex.value = playedSongs.value.length - 1
-                console.log('Playing retry FM song:', nextSongFromPool.name)
-                await togglePlay()
-                if (fmSongs.value.length < 2) {
-                    refreshFM({ silent: true })
-                }
+
+        if (!coverNavigating.value && token === coverNavigationToken && queuedDirection.value) {
+            const nextDirection = queuedDirection.value
+            queuedDirection.value = null
+            if (nextDirection === 'next') {
+                await goNext()
+            } else {
+                await goPrev()
             }
         }
     }
 }
 
-const prevSong = async () => {
-    if (currentIndex.value > 0) {
-        currentIndex.value--
-        if (currentSong.value) {
-            console.log('Playing previous FM song:', currentSong.value.name)
-            await togglePlay()
-        }
-    } else {
-        console.log('Already at first song, cannot go to previous')
-    }
-}
-
-const goNext = async () => {
-    if (coverNavigating.value) {
-        queueCoverDirection('next')
-        return
-    }
-
-    coverNavigating.value = true
-    clearCoverReleaseTimer()
-    setCoverTransitionDirection('next')
-
-    try {
-        await nextSong()
-    } finally {
-        scheduleCoverRelease()
-    }
-}
-
 const goPrev = async () => {
-    if (coverNavigating.value) {
+    if (isCoverTransitionBusy()) {
         queueCoverDirection('prev')
         return
     }
     if (currentIndex.value <= 0) return
 
-    coverNavigating.value = true
+    const token = ++coverNavigationToken
+    coverPreparingNavigation.value = true
     clearCoverReleaseTimer()
-    setCoverTransitionDirection('prev')
 
     try {
+        const canShift = await prepareCoverShift('prev', token)
+        if (!canShift) return
+
+        coverPreparingNavigation.value = false
+        coverNavigating.value = true
         await prevSong()
-    } finally {
         scheduleCoverRelease()
+    } finally {
+        if (token === coverNavigationToken) {
+            coverPreparingNavigation.value = false
+        }
     }
 }
 
@@ -1042,7 +1283,7 @@ const handleCoverSlotClick = async item => {
     if (!item || !item.clickable) return
 
     if (item.role === 'center') {
-        if (coverNavigating.value) return
+        if (isCoverTransitionBusy()) return
         await togglePlay()
         return
     }
@@ -1071,82 +1312,11 @@ const trashSong = async () => {
     }
 }
 
-// 检查并更新我喜欢的音乐歌单
-const updateFavoritePlaylistIfViewing = async () => {
-    // 检查当前是否在查看"我喜欢的音乐"歌单
-    if (libraryStore.libraryInfo && userStore.favoritePlaylistId && libraryStore.libraryInfo.id == userStore.favoritePlaylistId) {
-        console.log('当前正在查看我喜欢的音乐，正在更新歌单内容...')
-
-        try {
-            // 重新获取歌单详情
-            await libraryStore.updatePlaylistDetail(userStore.favoritePlaylistId)
-            console.log('我喜欢的音乐歌单已更新')
-        } catch (error) {
-            console.error('更新我喜欢的音乐歌单失败:', error)
-        }
-    }
-}
-
 const likeSong = async () => {
     if (!currentSong.value) return
     if (!Array.isArray(likelist.value)) return
 
-    const actionToken = createLikeActionToken()
-
-    try {
-        // 使用计算属性来判断当前的操作是“喜欢”还是“取消喜欢”
-        const isLiked = !isCurrentSongLiked.value
-        console.log('PersonalFM开始喜欢操作:', { songId: currentSong.value.id, like: isLiked })
-
-        // 1) 优先使用官方 /like 接口
-        try {
-            const result = await queueLikeRequest(actionToken, () => likeMusic(currentSong.value.id, isLiked))
-            if (result?.skipped) return
-            if (result && result.code === 200) {
-                if (!isActiveLikeActionToken(actionToken)) return
-                const fallbackLikelist = applyOptimisticLikeState(currentSong.value.id, isLiked, likelist.value)
-                userStore.updateLikelist(fallbackLikelist)
-                noticeOpen(await getFavoritePlaylistNoticeText(isLiked), 2)
-                await syncLikelistAfterLikeAction({
-                    songId: currentSong.value.id,
-                    like: isLiked,
-                    actionToken,
-                    fallbackLikelist,
-                })
-                if (!isActiveLikeActionToken(actionToken)) return
-                schedulePlaylistCacheInvalidation()
-                return
-            }
-            throw new Error(getLikeActionErrorMessage(result, 'likeMusic 返回异常'))
-        } catch (apiErr) {
-            console.warn('PersonalFM likeMusic 失败，尝试使用歌单 tracks:', apiErr.message)
-        }
-
-        // 2) 降级：使用“我喜欢的音乐”歌单 tracks
-        try {
-            const fallbackResult = await updateFavoritePlaylistTrack(currentSong.value.id, isLiked)
-            if (fallbackResult.success) {
-                if (!isActiveLikeActionToken(actionToken)) return
-                const fallbackLikelist = applyOptimisticLikeState(currentSong.value.id, isLiked, likelist.value)
-                userStore.updateLikelist(fallbackLikelist)
-                noticeOpen(isLiked ? `已添加到${fallbackResult.favoritePlaylist?.name || '我喜欢的音乐'}` : '已取消喜欢', 2)
-                await syncLikelistAfterLikeAction({
-                    songId: currentSong.value.id,
-                    like: isLiked,
-                    actionToken,
-                    fallbackLikelist,
-                })
-                if (!isActiveLikeActionToken(actionToken)) return
-                schedulePlaylistCacheInvalidation()
-                return
-            }
-            throw new Error(fallbackResult.message || '歌单 tracks 返回异常')
-        } catch (playlistError) {
-            console.error('PersonalFM 歌单 tracks 也失败:', playlistError)
-        }
-    } catch (error) {
-        console.error('Failed to like song:', error)
-    }
+    await likePlayerSong(!isCurrentSongLiked.value, currentSong.value.id)
 }
 
 const refreshFM = async ({ silent = false } = {}) => {
@@ -1163,8 +1333,6 @@ const refreshFM = async ({ silent = false } = {}) => {
     try {
         const selectedModeRequest = buildSelectedModeRequest(FM_MODE_REQUEST_LIMIT)
         const usingDefaultMode = !selectedModeRequest
-        const selectedModeLabel = usingDefaultMode ? DEFAULT_FM_MODE : `${selectedModeRequest.mode}${selectedModeRequest.submode ? `/${selectedModeRequest.submode}` : ''}`
-        console.log('[FM] Requesting Personal FM data, mode:', selectedModeLabel)
         let shouldTryModeRescue = false
 
         // 1) 主流程：DEFAULT 走 personal_fm，其余模式走 personal/fm/mode
@@ -1175,13 +1343,11 @@ const refreshFM = async ({ silent = false } = {}) => {
                 const response = await getPersonalFM()
                 if (!isActiveFmRefresh(requestToken, requestUserId)) return false
                 songs = Array.isArray(response?.data) ? response.data : []
-                console.log('[FM] personal_fm response size:', songs.length)
             } else {
                 const response = await getPersonalFMByMode(selectedModeRequest)
                 if (!isActiveFmRefresh(requestToken, requestUserId)) return false
                 songs = Array.isArray(response?.data) ? response.data : []
                 primarySource = FM_REFRESH_SOURCE.FM_MODE_RESCUE
-                console.log('[FM] personal/fm/mode response size:', songs.length, selectedModeRequest)
             }
 
             if (songs.length > 0) {
@@ -1191,25 +1357,17 @@ const refreshFM = async ({ silent = false } = {}) => {
                     lastRefreshSource.value = primarySource
                     lastLoadedUserId.value = requestUserId
                     bootstrapFromPoolIfNeeded(primarySource)
-                    console.log('[FM] refresh source:', lastRefreshSource.value)
                     return true
                 }
-                // 仅在“去重后无新增 + 当前无可播下一首”时触发模式救援
-                if (!nextCandidateSong.value && usingDefaultMode) {
+                // 去重后无新增时，如果候选池已经偏低，也继续走救援源补足右侧下一首
+                if ((!nextCandidateSong.value || isFmPoolLow()) && usingDefaultMode) {
                     shouldTryModeRescue = true
-                    console.log('[FM] personal_fm deduped to empty and no next candidate, try mode rescue')
-                } else if (!nextCandidateSong.value) {
-                    console.log('[FM] selected mode deduped to empty, fallback to daily recommendations')
-                } else {
-                    console.log('[FM] primary source deduped to empty, but next candidate already exists; skip fallback')
+                } else if (nextCandidateSong.value) {
                     return
                 }
-            } else if (!nextCandidateSong.value && usingDefaultMode) {
+            } else if ((!nextCandidateSong.value || isFmPoolLow()) && usingDefaultMode) {
                 shouldTryModeRescue = true
-                console.log('[FM] personal_fm returned empty list, try mode rescue')
-            } else if (!nextCandidateSong.value) {
-                console.log('[FM] selected mode returned empty list, fallback to daily recommendations')
-            } else {
+            } else if (nextCandidateSong.value) {
                 return
             }
         } catch (fmError) {
@@ -1225,7 +1383,6 @@ const refreshFM = async ({ silent = false } = {}) => {
                 const modeResponse = await getPersonalFMByMode(FM_MODE_RESCUE_OPTIONS)
                 if (!isActiveFmRefresh(requestToken, requestUserId)) return false
                 const modeSongs = Array.isArray(modeResponse?.data) ? modeResponse.data : []
-                console.log('[FM] fm_mode_rescue response size:', modeSongs.length, FM_MODE_RESCUE_OPTIONS)
                 if (modeSongs.length > 0) {
                     if (!isActiveFmRefresh(requestToken, requestUserId)) return false
                     const modeStats = addToFmPoolUnique(modeSongs, FM_REFRESH_SOURCE.FM_MODE_RESCUE)
@@ -1233,7 +1390,6 @@ const refreshFM = async ({ silent = false } = {}) => {
                         lastRefreshSource.value = FM_REFRESH_SOURCE.FM_MODE_RESCUE
                         lastLoadedUserId.value = requestUserId
                         bootstrapFromPoolIfNeeded(FM_REFRESH_SOURCE.FM_MODE_RESCUE)
-                        console.log('[FM] refresh source:', lastRefreshSource.value)
                         return true
                     }
                 }
@@ -1246,7 +1402,6 @@ const refreshFM = async ({ silent = false } = {}) => {
         try {
             const recResponse = await getRecommendSongs()
             if (!isActiveFmRefresh(requestToken, requestUserId)) return false
-            console.log('Daily recommendations response:', recResponse)
 
             if (recResponse && recResponse.data && recResponse.data.dailySongs) {
                 const songs = mapSongsPlayableStatus(recResponse.data.dailySongs)
@@ -1257,10 +1412,8 @@ const refreshFM = async ({ silent = false } = {}) => {
                     lastRefreshSource.value = FM_REFRESH_SOURCE.DAILY_RECOMMEND
                     lastLoadedUserId.value = requestUserId
                     bootstrapFromPoolIfNeeded(FM_REFRESH_SOURCE.DAILY_RECOMMEND)
-                    console.log('[FM] refresh source:', lastRefreshSource.value)
                     return true
                 }
-                console.log('[FM] daily_recommend deduped to empty')
             }
         } catch (recError) {
             console.warn('Daily recommendations also failed:', recError)
@@ -1278,18 +1431,14 @@ const refreshFM = async ({ silent = false } = {}) => {
 }
 
 const prefetchNextCandidate = async () => {
-    if (isPrefetching.value || loading.value || coverNavigating.value) return
+    if (isPrefetching.value || loading.value || isCoverTransitionBusy()) return
     if (!currentSong.value) return
-    // 历史尾部且右侧无候选时，静默预取下一首
+    // 历史尾部提前补足候选池，避免切歌后右侧短暂变成 NO NEXT
     if (currentIndex.value < playedSongs.value.length - 1) return
-    if (nextCandidateSong.value) return
+    const hasNextCandidate = !!nextCandidateSong.value
+    if (hasNextCandidate && !isFmPoolLow()) return
 
-    isPrefetching.value = true
-    try {
-        await refreshFM({ silent: true })
-    } finally {
-        isPrefetching.value = false
-    }
+    await requestFmPoolRefill({ showPending: !hasNextCandidate, force: !hasNextCandidate })
 }
 
 onMounted(() => {
@@ -1305,6 +1454,7 @@ onMounted(() => {
     window.addEventListener('fmPlayModeResponse', handleFMPlayModeResponse)
     window.addEventListener('fmPreviousResponse', handleFMPreviousResponse)
     window.addEventListener('fmNextResponse', handleFMNextResponse)
+    window.addEventListener('fmGaplessStarted', handleFMGaplessStarted)
     window.addEventListener('fmClearRecent', handleFmClearRecent)
     window.addEventListener('mousedown', handleModePanelClickOutside)
     window.addEventListener('touchstart', handleModePanelClickOutside)
@@ -1322,6 +1472,8 @@ onActivated(() => {
 })
 
 onDeactivated(() => {
+    cancelCoverTransitionState()
+    nextCandidateLoadShowsPending = false
     clearPanelIntroSchedule()
     isPanelIntroActive.value = false
     modePanelOpen.value = false
@@ -1332,10 +1484,12 @@ onUnmounted(() => {
     window.removeEventListener('fmPlayModeResponse', handleFMPlayModeResponse)
     window.removeEventListener('fmPreviousResponse', handleFMPreviousResponse)
     window.removeEventListener('fmNextResponse', handleFMNextResponse)
+    window.removeEventListener('fmGaplessStarted', handleFMGaplessStarted)
     window.removeEventListener('fmClearRecent', handleFmClearRecent)
     window.removeEventListener('mousedown', handleModePanelClickOutside)
     window.removeEventListener('touchstart', handleModePanelClickOutside)
-    clearCoverReleaseTimer()
+    cancelCoverTransitionState()
+    nextCandidateLoadShowsPending = false
     clearPanelIntroSchedule()
     isPanelIntroActive.value = false
     skipIntroOnNextActivated = true
@@ -1356,9 +1510,11 @@ watch(
 )
 
 watch(
-    [() => currentSong.value?.id, currentIndex, () => playedSongs.value.length, () => fmSongs.value.length, loading, coverNavigating],
+    [() => currentSong.value?.id, currentIndex, () => playedSongs.value.length, () => fmSongs.value.length, loading, coverNavigating, coverPreparingNavigation, quality, () => playerStore.gaplessPlayback],
     () => {
+        if (isCoverTransitionBusy()) return
         prefetchNextCandidate()
+        scheduleNextCandidateAssetPrefetch()
     },
     { immediate: true }
 )
@@ -1366,15 +1522,12 @@ watch(
 // 处理播放模式响应
 const handleFMPlayModeResponse = async event => {
     const { action } = event.detail
-    console.log('Received FM play mode response:', action)
 
     if (action === 'loop') {
         // 单曲循环模式：重新播放当前歌曲
-        console.log('Loop mode: replaying current song')
         await togglePlay()
     } else if (action === 'next') {
         // FM模式：播放下一首漫游歌曲
-        console.log('FM mode: playing next song')
         await goNext()
     }
 }
@@ -1382,10 +1535,8 @@ const handleFMPlayModeResponse = async event => {
 // 处理上一首FM歌曲响应
 const handleFMPreviousResponse = async event => {
     const { action } = event.detail
-    console.log('Received FM previous response:', action)
 
     if (action === 'previous') {
-        console.log('Playing previous FM song from player controls')
         await goPrev()
     }
 }
@@ -1393,17 +1544,63 @@ const handleFMPreviousResponse = async event => {
 // 处理下一首FM歌曲响应
 const handleFMNextResponse = async event => {
     const { action } = event.detail
-    console.log('Received FM next response:', action)
 
     if (action === 'next') {
-        console.log('Playing next FM song from player controls')
         await goNext()
     }
 }
 
+const handleFMGaplessStarted = async event => {
+    const { action, songId } = event.detail || {}
+    if (action !== 'next') return
+
+    const targetId = normalizeSongId(songId)
+    if (!targetId) return
+    if (normalizeSongId(currentSong.value?.id) === targetId) return
+
+    const historyCandidate = playedSongs.value[currentIndex.value + 1]
+    if (normalizeSongId(historyCandidate?.id) === targetId) {
+        const transitionToken = await startPassiveCoverShift('next')
+        const previousCoverLayout = transitionToken === coverNavigationToken ? captureCoverLayout() : null
+        commitCoverSongChange(
+            () => {
+                currentIndex.value++
+            },
+            { previousLayout: previousCoverLayout, startPlayback: false }
+        )
+        runAfterCoverSettles(scheduleNextCandidateAssetPrefetch)
+        if (transitionToken === coverNavigationToken) scheduleCoverRelease()
+        return
+    }
+
+    const poolIndex = fmSongs.value.findIndex(song => normalizeSongId(song?.id) === targetId)
+    if (poolIndex === -1) return
+
+    const transitionToken = normalizeSongId(nextCandidateSong.value?.id) === targetId ? await startPassiveCoverShift('next') : null
+    const previousCoverLayout = transitionToken === coverNavigationToken ? captureCoverLayout() : null
+    const [nextSongFromPool] = fmSongs.value.splice(poolIndex, 1)
+    if (!nextSongFromPool) {
+        if (transitionToken === coverNavigationToken) scheduleCoverRelease()
+        return
+    }
+
+    commitCoverSongChange(
+        () => {
+            fmPoolIds.delete(targetId)
+            playedSongs.value.push(nextSongFromPool)
+            rememberRecent(nextSongFromPool.id)
+            currentIndex.value = playedSongs.value.length - 1
+        },
+        { previousLayout: previousCoverLayout, startPlayback: false }
+    )
+    runAfterCoverSettles(scheduleNextCandidateAssetPrefetch)
+    if (transitionToken === coverNavigationToken) scheduleCoverRelease()
+
+    refillFmPoolIfLow()
+}
+
 // 处理设置页触发的清空漫游缓存事件
 const handleFmClearRecent = () => {
-    console.log('Received fmClearRecent event from Settings, reloading recent queue')
     loadPersistentRecent()
 }
 </script>

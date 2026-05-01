@@ -31,7 +31,11 @@ function createMpris(window){
   player.on('playpause', () => getRenderer()?.send('playpause'));
   player.on('play', () => getRenderer()?.send('play'));
   player.on('pause', () => getRenderer()?.send('pause'));
-  player.on('quit', () => app.exit());
+  player.on('quit', () => {
+    const renderer = getRenderer();
+    if (renderer) renderer.send('player-save');
+    else app.exit();
+  });
   player.on('position', args =>
     getRenderer()?.send('setPosition', args.position / 1000 / 1000)
   );
@@ -72,7 +76,6 @@ function createMpris(window){
   });
 
   ipcMain.on('switchRepeatMode', (e, mode) => {
-    console.log(mode);
     switch (mode) {
       case 'off':
         player.loopStatus = Player.LOOP_STATUS_NONE;

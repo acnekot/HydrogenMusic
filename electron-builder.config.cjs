@@ -8,6 +8,10 @@ const NODE_MODULE_PRUNE_DIRS = [
   'benchmarks',
   'docs',
   'doc',
+  'coverage',
+  'testdata',
+  '.vscode',
+  '.yarn',
 ];
 
 const NODE_MODULE_PRUNE_FILE_PATTERNS = [
@@ -21,6 +25,32 @@ const NODE_MODULE_PRUNE_FILE_PATTERNS = [
   'ChangeLog.*',
   'changelog',
   'changelog.*',
+  'HISTORY',
+  'HISTORY.*',
+  'History',
+  'History.*',
+  '*.test.js',
+  '*.test.ts',
+  '*.spec.js',
+  '*.spec.ts',
+  '*.test-d.ts',
+  '*.d.cts',
+  '*.d.mts',
+  '*.flow',
+  '*.ts',
+  'demo.*',
+  'Dockerfile',
+  'docker-compose.*',
+  '.dockerignore',
+  '.editorconfig',
+  '.prettierignore',
+  '.prettierrc',
+  '.prettierrc.*',
+  '.swcrc',
+  'jest.config.*',
+  'webpack.config.*',
+  'tsconfig.*',
+  'env-example',
 ];
 
 function detectRequestedTargets(argv) {
@@ -34,8 +64,8 @@ function detectRequestedTargets(argv) {
 
 function shouldExcludeLinuxOnlyDependencies() {
   const requestedTargets = detectRequestedTargets(process.argv);
-  if (requestedTargets.mac || requestedTargets.win) return true;
   if (requestedTargets.linux) return false;
+  if (requestedTargets.mac || requestedTargets.win) return true;
   return process.platform !== 'linux';
 }
 
@@ -46,6 +76,8 @@ const BASE_FILE_PATTERNS = [
   'dist/**/*',
   'src/assets/icon/**/*',
   'src/electron/**/*',
+  'src/shared/settingsDefaults.json',
+  'src/shared/settingsSchema.cjs',
   '!**/.DS_Store',
   '!**/node_modules',
   '!release{,/**/*}',
@@ -54,13 +86,29 @@ const BASE_FILE_PATTERNS = [
   '!src/assets/fonts{,/**/*}',
   '!**/node_modules/**/*.d.ts',
   '!**/node_modules/**/*.map',
-  '!**/node_modules/sharp/vendor/**/include{,/**/*}',
-  '!**/node_modules/sharp/src{,/**/*}',
-  '!**/node_modules/sharp/install{,/**/*}',
-  '!**/node_modules/sharp/binding.gyp',
-  '!**/node_modules/sharp/lib/index.d.ts',
-  '!**/node_modules/sharp/node_modules/node-addon-api{,/**/*}',
-  '!**/node_modules/sharp/node_modules/.bin{,/**/*}',
+  '!**/node_modules/@neteasecloudmusicapienhanced/api/public{,/**/*}',
+  '!**/node_modules/@neteasecloudmusicapienhanced/api/data/deviceid.txt',
+  '!**/node_modules/@neteasecloudmusicapienhanced/api/node_modules/xml2js/lib/xml2js.bc.js',
+  '!**/node_modules/ffmpeg-static/example.js',
+  '!**/node_modules/ffmpeg-static/install.js',
+  '!**/node_modules/ffmpeg-static/ffmpeg.README',
+  '!**/node_modules/ffmpeg-static/types',
+  '!**/node_modules/ffmpeg-static/types/**/*',
+  '!**/node_modules/ffmpeg-static/node_modules',
+  '!**/node_modules/ffmpeg-static/node_modules/**/*',
+  '!**/node_modules/axios/dist/axios.js',
+  '!**/node_modules/axios/dist/axios.min.js',
+  '!**/node_modules/axios/dist/browser',
+  '!**/node_modules/axios/dist/browser/**/*',
+  '!**/node_modules/axios/dist/esm',
+  '!**/node_modules/axios/dist/esm/**/*',
+  '!**/node_modules/node-forge/dist',
+  '!**/node_modules/node-forge/dist/**/*',
+  '!**/node_modules/pngjs/browser.js',
+  '!**/node_modules/source-map/dist',
+  '!**/node_modules/source-map/dist/**/*',
+  '!**/node_modules/node-gyp',
+  '!**/node_modules/node-gyp/**/*',
   ...NODE_MODULE_PRUNE_DIRS.flatMap((name) => [
     `!**/node_modules/**/${name}`,
     `!**/node_modules/**/${name}/**`,
@@ -73,6 +121,16 @@ const LINUX_ONLY_DEPENDENCY_EXCLUDES = [
   '!**/node_modules/dbus-next/**/*',
   '!**/node_modules/mpris-service',
   '!**/node_modules/mpris-service/**/*',
+  '!**/node_modules/abstract-socket',
+  '!**/node_modules/abstract-socket/**/*',
+  '!**/node_modules/bindings',
+  '!**/node_modules/bindings/**/*',
+  '!**/node_modules/file-uri-to-path',
+  '!**/node_modules/file-uri-to-path/**/*',
+  '!**/node_modules/nan',
+  '!**/node_modules/nan/**/*',
+  '!**/node_modules/usocket',
+  '!**/node_modules/usocket/**/*',
 ];
 
 const KEEP_NODE_MODULE_FILE = /(^|\/)(LICENSE(?:\.[^/]+)?|LICENCE(?:\.[^/]+)?|NOTICE(?:\.[^/]+)?|THIRD-PARTY-NOTICES(?:\.[^/]+)?)$/i;
@@ -85,15 +143,15 @@ module.exports = {
   // Electron locale naming differs across platforms, so keep both macOS and Windows/Linux variants.
   electronLanguages: ['en', 'en-US', 'zh_CN', 'zh_TW', 'zh-CN', 'zh-TW'],
   asarUnpack: [
-    '**/node_modules/sharp/**',
     '**/node_modules/ffmpeg-static/**',
   ],
   directories: {
     output: 'release/${version}',
   },
-  files: shouldExcludeLinuxOnlyDependencies()
-    ? [...BASE_FILE_PATTERNS, ...LINUX_ONLY_DEPENDENCY_EXCLUDES]
-    : BASE_FILE_PATTERNS,
+  files: [
+    ...BASE_FILE_PATTERNS,
+    ...(shouldExcludeLinuxOnlyDependencies() ? LINUX_ONLY_DEPENDENCY_EXCLUDES : []),
+  ],
   onNodeModuleFile: (filePath) => {
     const normalizedPath = filePath.replace(/\\/g, '/');
     return KEEP_NODE_MODULE_FILE.test(normalizedPath);

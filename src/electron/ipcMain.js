@@ -3,8 +3,31 @@ const axios = require('axios')
 const fs = require('fs')
 const path = require('path')
 const { parseFile } = require('music-metadata')
-const { spawn } = require('child_process')
+const { spawn, execFile } = require('child_process')
 const { loadLocalLyricPayload } = require('./localLyrics')
+const { registerSettingsIpc } = require('./ipc/settingsIpc')
+const { listSystemFonts } = require('./systemFonts')
+const {
+    getBufferLength,
+    getImageMime,
+    getImageMimeByPath,
+    isHttpUrl,
+    isPathInsideDirectory,
+    mergeCookieStrings,
+    normalizeHttpMethod,
+    normalizePlainObject,
+    normalizeResponseType,
+    normalizeTimeout,
+    parseCookieString,
+    parseUrlSafely,
+    sanitizePathToken,
+} = require('./ipcHelpers')
+let ncmCrypto = null
+try {
+    ncmCrypto = require('@neteasecloudmusicapienhanced/api/util/crypto.js')
+} catch (_) {
+    ncmCrypto = null
+}
 let ffmpegPath = null
 try {
     ffmpegPath = require('ffmpeg-static')
@@ -78,6 +101,76 @@ function attachWindowStateListeners(win) {
     }
 }
 
+function getOpenDirectoryProperties(platform = process.platform) {
+    const properties = ['openDirectory']
+    if (platform === 'darwin') properties.push('createDirectory')
+    return properties
+}
+
+function trimTrailingDirectorySeparator(targetPath) {
+    const value = String(targetPath || '').trim()
+    if (!value) return ''
+    const parsedPath = path.parse(value)
+    if (value === parsedPath.root) return value
+    return value.replace(/[\\/]+$/, '')
+}
+
+function normalizeSelectedDirectoryPath(targetPath) {
+    const normalizedPath = trimTrailingDirectorySeparator(targetPath)
+    if (!normalizedPath) return null
+
+    try {
+        const stats = fs.statSync(normalizedPath)
+        if (stats.isDirectory()) return normalizedPath
+        if (stats.isFile()) return path.dirname(normalizedPath)
+    } catch (_) {}
+
+    return normalizedPath
+}
+
+function chooseMacDirectoryWithAppleScript() {
+    return new Promise(resolve => {
+        execFile(
+            '/usr/bin/osascript',
+            ['-e', 'POSIX path of (choose folder with prompt "选择文件夹")'],
+            { windowsHide: true },
+            (error, stdout = '', stderr = '') => {
+                if (!error) {
+                    resolve({
+                        canceled: false,
+                        path: normalizeSelectedDirectoryPath(stdout),
+                        fallback: false,
+                    })
+                    return
+                }
+
+                const message = `${error.message || ''}\n${stderr || ''}`.toLowerCase()
+                if (message.includes('user canceled') || message.includes('-128')) {
+                    resolve({ canceled: true, path: null, fallback: false })
+                    return
+                }
+
+                resolve({ canceled: false, path: null, fallback: true })
+            }
+        )
+    })
+}
+
+async function showOpenDirectoryDialog(win) {
+    if (process.platform === 'darwin') {
+        const macResult = await chooseMacDirectoryWithAppleScript()
+        if (macResult.canceled || macResult.path || !macResult.fallback) return macResult.path
+    }
+
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+        title: '选择文件夹',
+        buttonLabel: '选择',
+        properties: getOpenDirectoryProperties(),
+    })
+    if (canceled) return null
+    return Array.isArray(filePaths) && filePaths[0] ? normalizeSelectedDirectoryPath(filePaths[0]) : null
+}
+
 module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     moduleState.win = win
     moduleState.app = app
@@ -120,11 +213,30 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     const disallowedForwardHeaders = new Set(['host', 'connection', 'content-length'])
     const trustedResourceHeaderNames = new Set(['accept', 'accept-language', 'content-type', 'referer', 'user-agent'])
     const trustedBiliResourceHeaderNames = new Set(['accept', 'accept-language', 'content-type', 'cookie', 'origin', 'referer', 'user-agent'])
+    const transientNetworkErrorCodes = new Set(['ECONNABORTED', 'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'ENOTFOUND'])
+    const timeoutNetworkErrorCodes = new Set(['ECONNABORTED', 'ETIMEDOUT', 'ESOCKETTIMEDOUT'])
+    const ncmApiRetryDelays = Object.freeze([300, 900])
+    const trustedResourceRetryDelays = Object.freeze([500])
+    const trustedResourceErrorMarker = '__hydrogenMusicTrustedResourceError'
+    const ncmClientLogEndpoint = 'https://clientlogusf.music.163.com/weapi/feedback/weblog'
+    const ncmOfficialReferer = 'https://music.163.com/'
+    const ncmWebUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0'
+    const allowedNcmClientLogActions = new Set(['startplay', 'play'])
 
     // 全局存储桌面歌词窗口引用
     let globalLyricWindow = null;
     let activeMusicVideoAbort = null
     let activeMusicVideoCancelListener = null
+
+    const parseStoredPlaylistPayload = playlist => {
+        if (playlist && typeof playlist === 'object') return playlist
+        if (typeof playlist !== 'string') return null
+        try {
+            return JSON.parse(playlist)
+        } catch (_) {
+            return null
+        }
+    }
 
     const clearMusicVideoCancelListener = listener => {
         if (!listener) return
@@ -219,19 +331,18 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         return Array.isArray(result) ? result : []
     }
 
-    const parseUrlSafely = value => {
-        try {
-            return new URL(String(value || '').trim())
-        } catch (_) {
-            return null
-        }
-    }
-
-    const isHttpUrl = urlObj => !!(urlObj && (urlObj.protocol === 'https:' || urlObj.protocol === 'http:'))
-
     const isTrustedShellUrl = urlObj => !!(urlObj && trustedShellProtocols.has(urlObj.protocol))
 
     const isTrustedExternalFetchUrl = urlObj => !!(urlObj && urlObj.protocol === 'https:' && trustedExternalFetchHosts.has(urlObj.hostname))
+    const isTrustedAudioFetchUrl = urlObj => {
+        if (!isHttpUrl(urlObj)) return false
+        const hostname = urlObj.hostname || ''
+        if (trustedExternalFetchHosts.has(hostname)) return true
+        return hostname === 'music.126.net'
+            || hostname.endsWith('.music.126.net')
+            || hostname === 'vod.126.net'
+            || hostname.endsWith('.vod.126.net')
+    }
 
     const isTrustedBiliDownloadUrl = urlObj => {
         if (!urlObj || urlObj.protocol !== 'https:') return false
@@ -243,17 +354,6 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         if (!isHttpUrl(urlObj)) return false
         if (!allowedNcmApiHosts.has(urlObj.hostname)) return false
         return String(urlObj.port || '') === '36530'
-    }
-
-    const normalizeHttpMethod = value => {
-        const method = String(value || 'get').trim().toLowerCase()
-        return ['get', 'post'].includes(method) ? method : null
-    }
-
-    const normalizeTimeout = value => {
-        const timeout = Number(value)
-        if (!Number.isFinite(timeout) || timeout <= 0) return 10000
-        return Math.min(Math.round(timeout), 2147483647)
     }
 
     const normalizeRequestHeaders = (headers, allowedHeaderNames = null) => {
@@ -281,14 +381,114 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         return result
     }
 
-    const normalizePlainObject = value => {
-        if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
-        return value
+    const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+    const getResponseBodyMessage = data => {
+        if (typeof data === 'string') return data
+        if (!data || typeof data !== 'object') return ''
+        return String(data.msg || data.message || data.error || '')
     }
 
-    const normalizeResponseType = value => {
-        const normalized = String(value || '').trim().toLowerCase()
-        return normalized === 'text' ? 'text' : 'json'
+    const getAxiosErrorMessage = error => {
+        return getResponseBodyMessage(error?.response?.data) || String(error?.message || '')
+    }
+
+    const isTransientNetworkMessage = message => {
+        return /timeout|timed\s*out|etimedout|econnaborted|econnreset|eai_again|enotfound|getaddrinfo|socket hang up|network/i.test(String(message || ''))
+    }
+
+    const isRetryableAxiosError = error => {
+        if (!error) return false
+        if (transientNetworkErrorCodes.has(error.code)) return true
+        const status = Number(error?.response?.status)
+        if (status === 408 || status === 429 || status >= 500) return true
+        return isTransientNetworkMessage(getAxiosErrorMessage(error))
+    }
+
+    const isRetryableHttpResponse = response => {
+        const status = Number(response?.status)
+        if (status === 408 || status === 429 || status >= 500) return true
+        return false
+    }
+
+    const requestWithTransientRetry = async (axiosConfig, retryDelays = []) => {
+        let lastError = null
+        let lastResponse = null
+
+        for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+            try {
+                const response = await axios(axiosConfig)
+                if (attempt < retryDelays.length && isRetryableHttpResponse(response)) {
+                    lastResponse = response
+                    await delay(retryDelays[attempt])
+                    continue
+                }
+                return response
+            } catch (error) {
+                lastError = error
+                if (attempt >= retryDelays.length || !isRetryableAxiosError(error)) throw error
+                await delay(retryDelays[attempt])
+            }
+        }
+
+        if (lastResponse) return lastResponse
+        throw lastError || new Error('request-failed')
+    }
+
+    const buildNcmApiErrorResponse = error => {
+        const statusFromResponse = Number(error?.response?.status)
+        if (statusFromResponse) {
+            return {
+                status: statusFromResponse,
+                statusText: error?.response?.statusText || '',
+                data: error?.response?.data || { code: statusFromResponse, msg: getAxiosErrorMessage(error) || 'ncm-api-request-failed' },
+                headers: error?.response?.headers || {},
+            }
+        }
+
+        const message = getAxiosErrorMessage(error) || 'ncm-api-request-failed'
+        const isTimeout = timeoutNetworkErrorCodes.has(error?.code) || /timeout|timed\s*out|etimedout|econnaborted/i.test(message)
+        const status = isTimeout ? 504 : 502
+
+        return {
+            status,
+            statusText: isTimeout ? 'Gateway Timeout' : 'Bad Gateway',
+            data: {
+                code: status,
+                msg: message,
+                ...(error?.code ? { errorCode: error.code } : {}),
+            },
+            headers: {},
+        }
+    }
+
+    const buildTrustedResourceError = (error, url) => {
+        const status = error?.response?.status
+        const statusText = error?.response?.statusText
+        const code = error?.code
+        const messageParts = ['trusted-resource-request-failed']
+
+        if (status) messageParts.push(`status=${status}`)
+        if (statusText) messageParts.push(`statusText=${statusText}`)
+        if (code) messageParts.push(`code=${code}`)
+        if (url) messageParts.push(`url=${url}`)
+
+        return new Error(messageParts.join(' '))
+    }
+
+    const buildTrustedResourceErrorPayload = (error, url) => {
+        const status = error?.response?.status
+        const statusText = error?.response?.statusText
+        const code = error?.code
+        const message = buildTrustedResourceError(error, url).message
+
+        return {
+            [trustedResourceErrorMarker]: true,
+            message,
+            ...(status ? { status } : {}),
+            ...(statusText ? { statusText } : {}),
+            ...(code ? { code } : {}),
+        }
     }
 
     const isSerializedFormData = value => {
@@ -329,40 +529,6 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         return formData
     }
 
-    const parseCookieString = cookieString => {
-        const cookieMap = new Map()
-        const cookieText = String(cookieString || '').trim()
-        if (!cookieText) return cookieMap
-
-        cookieText.split(';').forEach(segment => {
-            const cookiePart = String(segment || '').trim()
-            if (!cookiePart) return
-
-            const separatorIndex = cookiePart.indexOf('=')
-            if (separatorIndex <= 0) return
-
-            const name = cookiePart.slice(0, separatorIndex).trim()
-            const value = cookiePart.slice(separatorIndex + 1).trim()
-            if (!name || !value) return
-            cookieMap.set(name, value)
-        })
-
-        return cookieMap
-    }
-
-    const mergeCookieStrings = (...cookieStrings) => {
-        const mergedCookieMap = new Map()
-
-        cookieStrings.forEach(cookieString => {
-            parseCookieString(cookieString).forEach((value, key) => {
-                mergedCookieMap.set(key, value)
-            })
-        })
-
-        if (mergedCookieMap.size === 0) return ''
-        return Array.from(mergedCookieMap.entries()).map(([key, value]) => `${key}=${value}`).join('; ')
-    }
-
     const getBrowserSession = () => {
         try {
             return win?.webContents?.session || null
@@ -388,6 +554,33 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
 
         if (cookieMap.size === 0) return ''
         return Array.from(cookieMap.entries()).map(([name, value]) => `${name}=${value}`).join('; ')
+    }
+
+    const normalizeNcmClientLogs = logs => {
+        if (!Array.isArray(logs)) return []
+
+        return logs.slice(0, 8).map(log => {
+            const action = typeof log?.action === 'string' ? log.action.trim() : ''
+            const json = log?.json && typeof log.json === 'object' && !Array.isArray(log.json) ? log.json : null
+            if (!allowedNcmClientLogActions.has(action) || !json) return null
+            return { action, json }
+        }).filter(Boolean)
+    }
+
+    const buildNcmClientLogPayload = (logs, csrfToken = '') => {
+        if (!ncmCrypto || typeof ncmCrypto.weapi !== 'function') {
+            throw new Error('ncm-weapi-encrypt-unavailable')
+        }
+
+        return ncmCrypto.weapi({
+            logs: JSON.stringify(logs),
+            csrf_token: csrfToken || '',
+        })
+    }
+
+    const buildNcmClientLogUrl = csrfToken => {
+        const suffix = csrfToken ? `?csrf_token=${encodeURIComponent(csrfToken)}` : ''
+        return `${ncmClientLogEndpoint}${suffix}`
     }
 
     const parseSetCookieHeader = rawCookie => {
@@ -504,24 +697,6 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         }
     }
 
-    const isPathInsideDirectory = (directoryPath, targetPath) => {
-        if (!directoryPath || !targetPath) return false
-        const basePath = path.resolve(directoryPath)
-        const resolvedTargetPath = path.resolve(targetPath)
-        const relativePath = path.relative(basePath, resolvedTargetPath)
-        return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
-    }
-
-    const sanitizePathToken = (value, fallback = 'unknown') => {
-        const normalized = String(value ?? '')
-            .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .slice(0, 80)
-        if (!normalized || normalized === '.' || normalized === '..') return fallback
-        return normalized
-    }
-
     const getCurrentVideoStorageRoots = () => {
         const settings = settingsStore.get('settings')
         return getVideoStorageRoots(settings?.local?.videoFolder)
@@ -598,9 +773,10 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     })
     ipcMain.on('window-close', async () => {
         const settings = await settingsStore.get('settings')
-        if (settings.other.quitApp == 'minimize') {
+        const quitAppPreference = settings?.other?.quitApp === 'quit' ? 'quit' : 'minimize'
+        if (quitAppPreference == 'minimize') {
             win.hide()
-        } else if (settings.other.quitApp == 'quit') {
+        } else if (quitAppPreference == 'quit') {
             win.close()
         }
     })
@@ -617,19 +793,20 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         if (!normalizedFilePath) return null
 
         try {
+            const getPictureScore = pic => {
+                if (!pic || !pic.data) return -1
+                const type = `${pic.type || ''} ${pic.description || ''}`.toLowerCase()
+                const isFrontCover = type.includes('front') || type.includes('cover')
+                return getBufferLength(pic.data) + (isFrontCover ? 2 * 1024 * 1024 : 0)
+            }
             // 显式禁用跳过封面，避免新版库默认不读取封面
             const data = await parseFile(normalizedFilePath, { skipCovers: false }).catch(() => null)
             const picArr = data && data.common && Array.isArray(data.common.picture) ? data.common.picture : null
-            const pic = picArr && picArr.length > 0 ? picArr[0] : null
+            const pic = picArr && picArr.length > 0
+                ? picArr.slice().sort((a, b) => getPictureScore(b) - getPictureScore(a))[0]
+                : null
             if (pic && pic.data) {
-                let mime = (pic.format && String(pic.format).startsWith('image/')) ? pic.format : null
-                if (!mime) {
-                    // 简单的文件头嗅探，兜底 MIME
-                    const buf = Buffer.from(pic.data)
-                    if (buf.length > 12 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) mime = 'image/png'
-                    else if (buf.length > 3 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) mime = 'image/jpeg'
-                    else mime = 'image/jpeg'
-                }
+                const mime = getImageMime(pic.format, pic.data)
                 return `data:${mime};base64,${Buffer.from(pic.data).toString('base64')}`
             }
 
@@ -645,161 +822,38 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
                 path.join(parsed.dir, 'cover.png'),
                 path.join(parsed.dir, 'folder.png'),
             ]
-            const mapMime = (p) => {
-                const ext = (p.split('.').pop() || '').toLowerCase()
-                if (ext === 'png') return 'image/png'
-                if (ext === 'webp') return 'image/webp'
-                return 'image/jpeg'
-            }
+            let sidecarCover = null
             for (const p of candidates) {
                 try {
                     if (fs.existsSync(p)) {
-                        const b64 = fs.readFileSync(p).toString('base64')
-                        return `data:${mapMime(p)};base64,${b64}`
+                        const stat = fs.statSync(p)
+                        if (stat.isFile() && (!sidecarCover || stat.size > sidecarCover.size)) {
+                            sidecarCover = { path: p, size: stat.size }
+                        }
                     }
                 } catch (_) { /* ignore */ }
+            }
+            if (sidecarCover) {
+                const b64 = fs.readFileSync(sidecarCover.path).toString('base64')
+                return `data:${getImageMimeByPath(sidecarCover.path)};base64,${b64}`
             }
         } catch (e) {
             // ignore
         }
         return null
     })
-    const normalizeSearchAssistLimit = value => {
-        const num = Number.parseInt(value, 10)
-        if (!Number.isFinite(num)) return 8
-        return Math.max(1, num)
-    }
-    const defaultMusicLevel = 'lossless'
-    const availableMusicLevel = new Set([
-        'standard',
-        'higher',
-        'exhigh',
-        'lossless',
-        'hires',
-        'jyeffect',
-        'sky',
-        'dolby',
-        'jymaster',
-    ])
-
-    const normalizeMusicLevel = level => availableMusicLevel.has(level) ? level : defaultMusicLevel
-
-    const normalizeMusicSettings = (music = {}) => {
-        const normalized = { ...music }
-        normalized.searchAssistLimit = normalizeSearchAssistLimit(normalized.searchAssistLimit)
-        normalized.level = normalizeMusicLevel(normalized.level)
-        normalized.showSongTranslation = normalized.showSongTranslation !== false
-        // 兼容历史版本：读取后清理旧迁移标记字段。
-        delete normalized.levelMigratedToLosslessV1
-        return normalized
-    }
-
-    ipcMain.on('set-zoom', (e, factor) => {
-        const zoom = Math.max(0.5, Math.min(3, Number(factor) || 1))
-        win.webContents.setZoomFactor(zoom)
-    })
-
-    ipcMain.on('set-settings', (e, settings) => {
-        const parsedSettings = JSON.parse(settings)
-        if (!parsedSettings.music) parsedSettings.music = {}
-        // 保存时仅做合法值归一化，并清理历史迁移字段。
-        parsedSettings.music = normalizeMusicSettings(parsedSettings.music)
-        settingsStore.set('settings', parsedSettings)
-        registerShortcuts(win)
-    })
-    ipcMain.handle('get-settings', async () => {
-        const settings = await settingsStore.get('settings')
-        if (settings) {
-            if (!settings.music) settings.music = {}
-            // 读取时仅做归一化（保留旧版本合法音质选择，并清理历史迁移字段）。
-            settings.music = normalizeMusicSettings(settings.music)
-            settingsStore.set('settings', settings)
-            return settings
-        } else {
-            let initSettings = {
-                music: {
-                    level: defaultMusicLevel,
-                    lyricSize: '20',
-                    tlyricSize: '14',
-                    rlyricSize: '12',
-                    lyricInterlude: 13,
-                    searchAssistLimit: 8,
-                    showSongTranslation: true,
-                },
-                local: {
-                    videoFolder: null,
-                    downloadFolder: null,
-                    downloadCreateSongFolder: false,
-                    downloadSaveLyricFile: false,
-                    localFolder: []
-                },
-                shortcuts: [
-                    {
-                        id: 'play',
-                        name: '播放/暂停',
-                        shortcut: 'CommandOrControl+P',
-                        globalShortcut: 'CommandOrControl+Alt+P',
-                    },
-                    {
-                        id: 'last',
-                        name: '上一首',
-                        shortcut: 'CommandOrControl+Left',
-                        globalShortcut: 'CommandOrControl+Alt+Left',
-                    },
-                    {
-                        id: 'next',
-                        name: '下一首',
-                        shortcut: 'CommandOrControl+Right',
-                        globalShortcut: 'CommandOrControl+Alt+Right',
-                    },
-                    {
-                        id: 'volumeUp',
-                        name: '增加音量',
-                        shortcut: 'CommandOrControl+Up',
-                        globalShortcut: 'CommandOrControl+Alt+Up',
-                    },
-                    {
-                        id: 'volumeDown',
-                        name: '减少音量',
-                        shortcut: 'CommandOrControl+Down',
-                        globalShortcut: 'CommandOrControl+Alt+Down',
-                    },
-                    {
-                        id: 'processForward',
-                        name: '快进(3s)',
-                        shortcut: 'CommandOrControl+]',
-                        globalShortcut: 'CommandOrControl+Alt+]',
-                    },
-                    {
-                        id: 'processBack',
-                        name: '后退(3s)',
-                        shortcut: 'CommandOrControl+[',
-                        globalShortcut: 'CommandOrControl+Alt+[',
-                    },
-                ],
-                other: {
-                    globalShortcuts: true,
-                    quitApp: 'minimize'
-                }
-            }
-            settingsStore.set('settings', initSettings)
-            registerShortcuts(win)
-            return initSettings
-        }
-    })
-    ipcMain.handle('dialog:openFile', async () => {
+    registerSettingsIpc({ ipcMain, settingsStore, win, registerShortcuts })
+    ipcMain.handle('system-fonts:list', () => listSystemFonts())
+    const handleOpenDirectoryDialog = async () => {
         try {
-            const activeWin = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null
-            const { canceled, filePaths } = await dialog.showOpenDialog(activeWin, {
-                properties: ['openDirectory', 'createDirectory', 'promptToCreate']
-            })
-            if (canceled) return null
-            return Array.isArray(filePaths) && filePaths[0] ? filePaths[0] : null
+            return await showOpenDirectoryDialog(win)
         } catch (error) {
             console.error('打开目录选择器失败:', error)
             return null
         }
-    })
+    }
+    ipcMain.handle('dialog:openDirectory', handleOpenDirectoryDialog)
+    ipcMain.handle('dialog:openFile', handleOpenDirectoryDialog)
     ipcMain.handle('dialog:openImageFile', async () => {
         const { canceled, filePaths } = await dialog.showOpenDialog({
             properties: ['openFile'],
@@ -807,6 +861,10 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         })
         if (canceled) return null
         return filePaths && filePaths.length ? filePaths[0] : null
+    })
+    ipcMain.on('set-zoom', (e, factor) => {
+        const zoom = Math.max(0.5, Math.min(3, Number(factor) || 1))
+        win.webContents.setZoomFactor(zoom)
     })
     ipcMain.on('register-shortcuts', () => {
         registerShortcuts(win, app)
@@ -816,10 +874,12 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         globalShortcut.unregisterAll()
     })
     ipcMain.on('save-last-playlist', (e, playlist) => {
-        lastPlaylistStore.set('playlist', JSON.parse(playlist))
+        const parsedPlaylist = parseStoredPlaylistPayload(playlist)
+        if (parsedPlaylist) lastPlaylistStore.set('playlist', parsedPlaylist)
     })
     ipcMain.on('exit-app', (e, playlist) => {
-        lastPlaylistStore.set('playlist', JSON.parse(playlist))
+        const parsedPlaylist = parseStoredPlaylistPayload(playlist)
+        if (parsedPlaylist) lastPlaylistStore.set('playlist', parsedPlaylist)
         app.exit()
     })
     ipcMain.handle('get-last-playlist', async () => {
@@ -830,6 +890,14 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     ipcMain.on('open-local-folder', (e, targetPath) => {
         const normalizedTargetPath = normalizeAllowedMediaPath(targetPath, { allowDirectory: true })
         if (!normalizedTargetPath) return
+
+        try {
+            const stat = fs.statSync(normalizedTargetPath)
+            if (stat.isDirectory()) {
+                shell.openPath(normalizedTargetPath)
+                return
+            }
+        } catch (_) {}
 
         shell.showItemInFolder(normalizedTargetPath)
     })
@@ -853,24 +921,84 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         delete normalizedHeaders.cookie
         const requestData = await rebuildSerializedRequestData(request.data, normalizedHeaders)
 
-        const response = await axios({
-            url: parsedUrl.toString(),
-            method,
-            params: normalizedParams,
-            data: requestData,
-            headers: normalizedHeaders,
-            timeout: normalizeTimeout(request.timeout),
-            responseType: normalizeResponseType(request.responseType),
-            validateStatus: () => true,
-        })
+        try {
+            const response = await requestWithTransientRetry({
+                url: parsedUrl.toString(),
+                method,
+                params: normalizedParams,
+                data: requestData,
+                headers: normalizedHeaders,
+                timeout: normalizeTimeout(request.timeout),
+                responseType: normalizeResponseType(request.responseType),
+                validateStatus: () => true,
+            }, method === 'get' ? ncmApiRetryDelays : [])
 
-        await syncNcmApiResponseCookies(parsedUrl, response.headers || {})
+            await syncNcmApiResponseCookies(parsedUrl, response.headers || {})
 
-        return {
-            status: response.status,
-            statusText: response.statusText || '',
-            data: response.data,
-            headers: response.headers || {},
+            return {
+                status: response.status,
+                statusText: response.statusText || '',
+                data: response.data,
+                headers: response.headers || {},
+            }
+        } catch (error) {
+            return buildNcmApiErrorResponse(error)
+        }
+    })
+    ipcMain.removeHandler('ncm-client-log-submit')
+    ipcMain.handle('ncm-client-log-submit', async (_event, request = {}) => {
+        const logs = normalizeNcmClientLogs(request?.logs)
+        if (logs.length === 0) {
+            return {
+                status: 400,
+                statusText: 'Bad Request',
+                data: { code: 400, msg: 'empty-ncm-client-log' },
+                headers: {},
+            }
+        }
+
+        const sessionCookieString = await getNcmApiSessionCookieString()
+        const requestCookieString = typeof request?.cookie === 'string' ? request.cookie : ''
+        const cookieString = mergeCookieStrings(sessionCookieString, requestCookieString)
+        const cookieMap = parseCookieString(cookieString)
+        if (!cookieString || !cookieMap.has('MUSIC_U')) {
+            return {
+                status: 401,
+                statusText: 'Unauthorized',
+                data: { code: 401, msg: 'ncm-login-cookie-required' },
+                headers: {},
+            }
+        }
+
+        const csrfToken = cookieMap.get('__csrf') || ''
+        const timeout = normalizeTimeout(request?.timeout || 8000)
+
+        try {
+            const encryptedPayload = buildNcmClientLogPayload(logs, csrfToken)
+            const response = await requestWithTransientRetry({
+                url: buildNcmClientLogUrl(csrfToken),
+                method: 'post',
+                data: new URLSearchParams(encryptedPayload).toString(),
+                headers: {
+                    Cookie: cookieString,
+                    Origin: ncmOfficialReferer.replace(/\/$/, ''),
+                    Referer: ncmOfficialReferer,
+                    'User-Agent': ncmWebUserAgent,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                timeout,
+                responseType: normalizeResponseType(request?.responseType),
+                validateStatus: () => true,
+            }, trustedResourceRetryDelays)
+
+            return {
+                status: response.status,
+                statusText: response.statusText || '',
+                data: response.data,
+                headers: response.headers || {},
+            }
+        } catch (error) {
+            return buildNcmApiErrorResponse(error)
         }
     })
     ipcMain.removeHandler('trusted-resource-request')
@@ -882,16 +1010,57 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
             throw new Error('unsupported-trusted-resource-request')
         }
 
-        const response = await axios({
+        const requestUrl = parsedUrl.toString()
+
+        try {
+            const response = await requestWithTransientRetry({
+                url: requestUrl,
+                method: 'get',
+                params: normalizePlainObject(option.params),
+                headers: normalizeRequestHeaders(option.headers, getTrustedResourceHeaderAllowList(parsedUrl)),
+                timeout: normalizeTimeout(option.timeout),
+                responseType: normalizeResponseType(option.responseType),
+                validateStatus: () => true,
+            }, trustedResourceRetryDelays)
+
+            if (response.status < 200 || response.status >= 300) {
+                return buildTrustedResourceErrorPayload({ response }, requestUrl)
+            }
+
+            return response.data
+        } catch (error) {
+            return buildTrustedResourceErrorPayload(error, requestUrl)
+        }
+    })
+    ipcMain.removeHandler('audio-buffer-request')
+    ipcMain.handle('audio-buffer-request', async (e, request = {}) => {
+        const parsedUrl = parseUrlSafely(request.url)
+        const option = request?.option && typeof request.option === 'object' ? request.option : request
+        if (!isTrustedAudioFetchUrl(parsedUrl)) {
+            throw new Error('unsupported-audio-buffer-request')
+        }
+
+        const response = await requestWithTransientRetry({
             url: parsedUrl.toString(),
             method: 'get',
             params: normalizePlainObject(option.params),
-            headers: normalizeRequestHeaders(option.headers, getTrustedResourceHeaderAllowList(parsedUrl)),
-            timeout: normalizeTimeout(option.timeout),
-            responseType: normalizeResponseType(option.responseType),
-        })
+            headers: normalizeRequestHeaders(option.headers, trustedResourceHeaderNames),
+            timeout: normalizeTimeout(option.timeout || 45000),
+            responseType: 'arraybuffer',
+            validateStatus: () => true,
+        }, trustedResourceRetryDelays)
 
-        return response.data
+        if (response.status < 200 || response.status >= 300) {
+            throw buildTrustedResourceError({ response }, parsedUrl.toString())
+        }
+
+        return Buffer.from(response.data)
+    })
+    ipcMain.removeHandler('read-local-audio-buffer')
+    ipcMain.handle('read-local-audio-buffer', async (e, filePath) => {
+        const audioPath = normalizeAllowedMediaPath(filePath)
+        if (!audioPath) throw new Error('unsupported-local-audio-buffer-request')
+        return fs.promises.readFile(audioPath)
     })
     async function searchMusicVideo(id) {
         const result = await getStoredMusicVideos()
@@ -910,6 +1079,19 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         if (result) musicVideo.splice(result.index, 1)
         musicVideo.push({ ...data, path: normalizedPath })
         musicVideoStore.set('musicVideo', musicVideo)
+    }
+    function parseMusicVideoTimingPayload(timing) {
+        try {
+            return JSON.parse(timing)
+        } catch (_) {
+            return null
+        }
+    }
+    function saveMusicVideoRequestParams(params, videoPath) {
+        if (!params || typeof params !== 'object') return
+        params.timing = parseMusicVideoTimingPayload(params.timing)
+        params.path = videoPath
+        saveMusicVideo(params)
     }
     function fileIsExists(path) {
         return new Promise((resolve, reject) => {
@@ -971,14 +1153,8 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
             return ''
         })()
         if (existingVideoPath) {
-            try {
-                request.option.params.timing = JSON.parse(request.option.params.timing)
-            } catch (_) {
-                request.option.params.timing = null
-            }
             finalVideoPath = existingVideoPath
-            request.option.params.path = finalVideoPath
-            saveMusicVideo(request.option.params)
+            saveMusicVideoRequestParams(request?.option?.params, finalVideoPath)
             return returnCode
         } else {
             if (typeof activeMusicVideoAbort === 'function') {
@@ -1004,7 +1180,7 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
                 if (returnCode == 'cancel') return
                 returnCode = 'cancel'
                 try { requestCancel && requestCancel(reason) } catch (_) {}
-                try { transcodeProc && transcodeProc.kill('SIGKILL') } catch (_) {}
+                try { transcodeProc && transcodeProc.kill() } catch (_) {}
                 try { writer && !writer.destroyed && writer.destroy(new Error(reason)) } catch (_) {}
             }
 
@@ -1028,13 +1204,7 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
                     const isHevc = /hev1|hvc1|hevc/.test(codec)
 
                     const finalizeSave = () => {
-                        try {
-                            request.option.params.timing = JSON.parse(request.option.params.timing)
-                        } catch (_) {
-                            request.option.params.timing = null
-                        }
-                        request.option.params.path = finalVideoPath
-                        saveMusicVideo(request.option.params)
+                        saveMusicVideoRequestParams(request?.option?.params, finalVideoPath)
                         resolveOnce(resolve, abortCurrentDownload, 'success')
                     }
 
@@ -1127,12 +1297,9 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         }
 
         const lookupTask = (async () => {
-            console.log('检查视频是否存在 - 歌曲ID:', lookupId, '方法:', lookupMethod)
             const result = await searchMusicVideo(lookupId)
-            console.log('searchMusicVideo 结果:', result)
 
             if (!result) {
-                console.log('没有找到该歌曲的视频数据')
                 return false
             }
 
@@ -1141,7 +1308,6 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
             result.data.path = normalizedPath
             if (lookupMethod == 'get') return result
             const file = await fileIsExists(normalizedPath)
-            console.log('文件是否存在:', file, '路径:', result.data.path)
             if (!file) return '404'
             return result
         })().finally(() => {
@@ -1216,6 +1382,43 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
 
     // 桌面歌词相关 IPC 处理
     const { createLyricWindow, closeLyricWindow, setLyricWindowMovable, getLyricWindow } = lyricFunctions
+    const isLyricWindowDestroyed = lyricWindow => {
+        try {
+            return !lyricWindow || lyricWindow.isDestroyed?.()
+        } catch (_) {
+            return true
+        }
+    }
+    const getSafeLyricWindow = () => {
+        let lyricWindow = globalLyricWindow
+        if (isLyricWindowDestroyed(lyricWindow)) {
+            globalLyricWindow = null
+            try {
+                lyricWindow = getLyricWindow && getLyricWindow()
+            } catch (_) {
+                lyricWindow = null
+            }
+        }
+        if (isLyricWindowDestroyed(lyricWindow)) return null
+        globalLyricWindow = lyricWindow
+        return lyricWindow
+    }
+    const withLyricWindow = (operation, missingFallback = null, errorFallback = missingFallback) => {
+        const lyricWindow = getSafeLyricWindow()
+        if (!lyricWindow) return missingFallback
+        try {
+            return operation(lyricWindow)
+        } catch (error) {
+            return typeof errorFallback === 'function' ? errorFallback(error) : errorFallback
+        }
+    }
+    const sendLyricWindowUpdate = data => {
+        return withLyricWindow(lyricWindow => {
+            if (!lyricWindow.webContents || lyricWindow.webContents.isDestroyed?.()) return false
+            lyricWindow.webContents.send('lyric-update', data)
+            return true
+        }, false)
+    }
 
     ipcMain.handle('create-lyric-window', async () => {
         try {
@@ -1273,14 +1476,7 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     })
 
     ipcMain.on('update-lyric-data', (event, data) => {
-        let lyricWindow = globalLyricWindow
-        if (!lyricWindow && getLyricWindow) {
-            lyricWindow = getLyricWindow()
-        }
-
-        if (lyricWindow && !lyricWindow.isDestroyed()) {
-            lyricWindow.webContents.send('lyric-update', data)
-        }
+        sendLyricWindowUpdate(data)
     })
 
     ipcMain.on('request-lyric-data', (event) => {
@@ -1288,180 +1484,110 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     })
 
     ipcMain.on('current-lyric-data', (event, data) => {
-        const lyricWindow = getLyricWindow && getLyricWindow()
-        if (lyricWindow && !lyricWindow.isDestroyed()) {
-            lyricWindow.webContents.send('lyric-update', data)
-        }
+        sendLyricWindowUpdate(data)
     })
 
     ipcMain.handle('is-lyric-window-visible', () => {
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        return lyricWindow && !lyricWindow.isDestroyed() && lyricWindow.isVisible();
+        return withLyricWindow(lyricWindow => lyricWindow.isVisible(), false)
     });
 
     // 调整桌面歌词窗口大小
-    ipcMain.handle('resize-lyric-window', (event, { width, height }) => {
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (lyricWindow && !lyricWindow.isDestroyed()) {
-            try {
-                lyricWindow.setSize(width, height);
-                return { success: true };
-            } catch (error) {
-
-                return { success: false, error: error.message };
-            }
-        }
-        return { success: false, error: '窗口不存在' };
+    ipcMain.handle('resize-lyric-window', (event, { width, height } = {}) => {
+        return withLyricWindow(
+            lyricWindow => {
+                lyricWindow.setSize(width, height)
+                return { success: true }
+            },
+            { success: false, error: '窗口不存在' },
+            error => ({ success: false, error: error.message })
+        )
     });
 
     // 获取桌面歌词窗口位置与尺寸
     ipcMain.handle('get-lyric-window-bounds', () => {
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (lyricWindow && !lyricWindow.isDestroyed()) {
-            try {
-                return lyricWindow.getBounds();
-            } catch (error) {
-                return null;
-            }
-        }
-        return null;
+        return withLyricWindow(lyricWindow => lyricWindow.getBounds(), null)
     });
 
     // 移动桌面歌词窗口到指定坐标（基于屏幕坐标）
-    ipcMain.on('move-lyric-window', (event, { x, y }) => {
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (lyricWindow && !lyricWindow.isDestroyed() && typeof x === 'number' && typeof y === 'number') {
-            try {
-                lyricWindow.setPosition(Math.round(x), Math.round(y));
-            } catch (error) {
-                // 忽略移动错误
-            }
-        }
+    ipcMain.on('move-lyric-window', (event, { x, y } = {}) => {
+        if (typeof x !== 'number' || typeof y !== 'number') return
+        withLyricWindow(lyricWindow => {
+            lyricWindow.setPosition(Math.round(x), Math.round(y))
+        })
     });
 
     // 按增量移动桌面歌词窗口（无需预先获取窗口位置）
-    ipcMain.on('move-lyric-window-by', (event, { dx, dy }) => {
+    ipcMain.on('move-lyric-window-by', (event, { dx, dy } = {}) => {
         if (process.platform === 'darwin') return; // macOS 保持原生
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (lyricWindow && !lyricWindow.isDestroyed() && typeof dx === 'number' && typeof dy === 'number') {
-            try {
-                const { x, y } = lyricWindow.getBounds();
-                lyricWindow.setPosition(Math.round(x + dx), Math.round(y + dy));
-            } catch (error) {
-                // 忽略移动错误
-            }
-        }
+        if (typeof dx !== 'number' || typeof dy !== 'number') return
+        withLyricWindow(lyricWindow => {
+            const { x, y } = lyricWindow.getBounds()
+            lyricWindow.setPosition(Math.round(x + dx), Math.round(y + dy))
+        })
     });
 
     // 将窗口移动到指定位置，并强制保持给定宽高
-    ipcMain.on('move-lyric-window-to', (event, { x, y, width, height }) => {
+    ipcMain.on('move-lyric-window-to', (event, { x, y, width, height } = {}) => {
         if (process.platform === 'darwin') return; // macOS 保持原生
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (
-            lyricWindow &&
-            !lyricWindow.isDestroyed() &&
-            typeof x === 'number' && typeof y === 'number' &&
-            typeof width === 'number' && typeof height === 'number'
-        ) {
-            try {
-                lyricWindow.setBounds({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
-            } catch (error) {
-                // 忽略移动错误
-            }
-        }
+        if (typeof x !== 'number' || typeof y !== 'number' || typeof width !== 'number' || typeof height !== 'number') return
+        withLyricWindow(lyricWindow => {
+            lyricWindow.setBounds({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) })
+        })
     });
 
     // 读取窗口最小/最大尺寸（Windows专用）
     ipcMain.handle('get-lyric-window-min-max', () => {
         if (process.platform === 'darwin') return null;
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (lyricWindow && !lyricWindow.isDestroyed()) {
-            try {
-                const [minWidth, minHeight] = lyricWindow.getMinimumSize();
-                const [maxWidth, maxHeight] = lyricWindow.getMaximumSize();
-                return { minWidth, minHeight, maxWidth, maxHeight };
-            } catch (error) {
-                return null;
-            }
-        }
-        return null;
+        return withLyricWindow(lyricWindow => {
+            const [minWidth, minHeight] = lyricWindow.getMinimumSize()
+            const [maxWidth, maxHeight] = lyricWindow.getMaximumSize()
+            return { minWidth, minHeight, maxWidth, maxHeight }
+        }, null)
     });
 
     // 设置窗口最小/最大尺寸（Windows专用）
-    ipcMain.on('set-lyric-window-min-max', (event, { minWidth, minHeight, maxWidth, maxHeight }) => {
+    ipcMain.on('set-lyric-window-min-max', (event, { minWidth, minHeight, maxWidth, maxHeight } = {}) => {
         if (process.platform === 'darwin') return;
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (lyricWindow && !lyricWindow.isDestroyed()) {
-            try {
-                if (typeof minWidth === 'number' && typeof minHeight === 'number') {
-                    lyricWindow.setMinimumSize(Math.max(0, Math.round(minWidth)), Math.max(0, Math.round(minHeight)));
-                }
-                if (typeof maxWidth === 'number' && typeof maxHeight === 'number') {
-                    lyricWindow.setMaximumSize(Math.max(0, Math.round(maxWidth)), Math.max(0, Math.round(maxHeight)));
-                }
-            } catch (error) {
-                // 忽略错误
+        withLyricWindow(lyricWindow => {
+            if (typeof minWidth === 'number' && typeof minHeight === 'number') {
+                lyricWindow.setMinimumSize(Math.max(0, Math.round(minWidth)), Math.max(0, Math.round(minHeight)))
             }
-        }
+            if (typeof maxWidth === 'number' && typeof maxHeight === 'number') {
+                lyricWindow.setMaximumSize(Math.max(0, Math.round(maxWidth)), Math.max(0, Math.round(maxHeight)))
+            }
+        })
     });
 
     // 设置窗口宽高比（Windows专用）
-    ipcMain.on('set-lyric-window-aspect-ratio', (event, { aspectRatio }) => {
+    ipcMain.on('set-lyric-window-aspect-ratio', (event, { aspectRatio } = {}) => {
         if (process.platform === 'darwin') return;
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (lyricWindow && !lyricWindow.isDestroyed()) {
-            try {
-                const ratio = typeof aspectRatio === 'number' ? aspectRatio : 0;
-                lyricWindow.setAspectRatio(ratio > 0 ? ratio : 0);
-            } catch (error) {
-                // 忽略错误
-            }
-        }
+        withLyricWindow(lyricWindow => {
+            const ratio = typeof aspectRatio === 'number' ? aspectRatio : 0
+            lyricWindow.setAspectRatio(ratio > 0 ? ratio : 0)
+        })
     });
 
     // 读取内容区域的bounds（Windows专用）
     ipcMain.handle('get-lyric-window-content-bounds', () => {
         if (process.platform === 'darwin') return null;
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (lyricWindow && !lyricWindow.isDestroyed()) {
-            try {
-                return lyricWindow.getContentBounds();
-            } catch (error) {
-                return null;
-            }
-        }
-        return null;
+        return withLyricWindow(lyricWindow => lyricWindow.getContentBounds(), null)
     });
 
     // 设置内容区域的bounds（Windows专用）
-    ipcMain.on('move-lyric-window-content-to', (event, { x, y, width, height }) => {
+    ipcMain.on('move-lyric-window-content-to', (event, { x, y, width, height } = {}) => {
         if (process.platform === 'darwin') return;
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (
-            lyricWindow &&
-            !lyricWindow.isDestroyed() &&
-            typeof x === 'number' && typeof y === 'number' &&
-            typeof width === 'number' && typeof height === 'number'
-        ) {
-            try {
-                lyricWindow.setContentBounds({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
-            } catch (error) {
-                // 忽略错误
-            }
-        }
+        if (typeof x !== 'number' || typeof y !== 'number' || typeof width !== 'number' || typeof height !== 'number') return
+        withLyricWindow(lyricWindow => {
+            lyricWindow.setContentBounds({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) })
+        })
     });
 
     // 设置桌面歌词窗口的可调整大小状态（用于拖拽期间临时禁用）
-    ipcMain.on('set-lyric-window-resizable', (event, { resizable }) => {
+    ipcMain.on('set-lyric-window-resizable', (event, { resizable } = {}) => {
         if (process.platform !== 'win32') return; // 仅Windows需要
-        const lyricWindow = getLyricWindow && getLyricWindow();
-        if (lyricWindow && !lyricWindow.isDestroyed()) {
-            try {
-                lyricWindow.setResizable(!!resizable);
-            } catch (error) {
-                // 忽略错误
-            }
-        }
+        withLyricWindow(lyricWindow => {
+            lyricWindow.setResizable(!!resizable)
+        })
     });
 
     // 处理桌面歌词窗口关闭通知

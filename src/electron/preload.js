@@ -1,4 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron')
+const { pathToFileURL } = require('url')
+const TRUSTED_RESOURCE_ERROR_MARKER = '__hydrogenMusicTrustedResourceError'
 
 function subscribeChannel(channel, callback) {
     if (typeof callback !== 'function') return () => {}
@@ -160,8 +162,26 @@ function whenNcmApiReady() {
 function requestNcmApi(request) {
     return ipcRenderer.invoke('ncm-api-request', request)
 }
+function submitNcmClientLog(request) {
+    return ipcRenderer.invoke('ncm-client-log-submit', request)
+}
 function requestTrustedResource(request) {
-    return ipcRenderer.invoke('trusted-resource-request', request)
+    return ipcRenderer.invoke('trusted-resource-request', request).then((response) => {
+        if (response && typeof response === 'object' && response[TRUSTED_RESOURCE_ERROR_MARKER]) {
+            const error = new Error(response.message || 'trusted-resource-request-failed')
+            if (response.code) error.code = response.code
+            if (response.status) error.status = response.status
+            if (response.statusText) error.statusText = response.statusText
+            throw error
+        }
+        return response
+    })
+}
+function requestAudioArrayBuffer(request) {
+    return ipcRenderer.invoke('audio-buffer-request', request)
+}
+function readLocalAudioBuffer(filePath) {
+    return ipcRenderer.invoke('read-local-audio-buffer', filePath)
 }
 function clearNcmApiCookies() {
     return ipcRenderer.invoke('ncm-api-cookie-clear')
@@ -198,10 +218,20 @@ function sendPlayerCurrentTrackTime(t) {
   ipcRenderer.send("playerCurrentTrackTime", t)
 }
 
+function setZoom(factor) {
+    ipcRenderer.send('set-zoom', factor)
+}
+
 function toFileUrl(filePathOrUrl) {
     if (!filePathOrUrl || typeof filePathOrUrl !== 'string') return ''
-    if (filePathOrUrl.startsWith('file://')) return filePathOrUrl
-    const normalized = String(filePathOrUrl).replace(/\\/g, '/')
+    const value = filePathOrUrl.trim()
+    if (!value) return ''
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) return value
+    try {
+        return pathToFileURL(value).toString()
+    } catch (_) {}
+
+    const normalized = value.replace(/\\/g, '/')
     // If it already looks like a URL (http/https/etc.), return as-is
     if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(normalized)) return normalized
 
@@ -213,10 +243,6 @@ function toFileUrl(filePathOrUrl) {
     return encoded.startsWith('/') ? `file://${encoded}` : `file:///${encoded}`
 }
 
-
-function setZoom(factor) {
-    ipcRenderer.send('set-zoom', factor)
-}
 
 contextBridge.exposeInMainWorld('windowApi', {
     windowMin,
@@ -252,7 +278,9 @@ contextBridge.exposeInMainWorld('windowApi', {
     hidePlayer,
     setSettings,
     getSettings: () => ipcRenderer.invoke('get-settings'),
-    openFile: () => ipcRenderer.invoke('dialog:openFile'),
+    getSystemFonts: () => ipcRenderer.invoke('system-fonts:list'),
+    openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+    openFile: () => ipcRenderer.invoke('dialog:openDirectory'),
     openImageFile: () => ipcRenderer.invoke('dialog:openImageFile'),
     clearLocalMusicData,
     persistLocalMusicDerived: (payload) => ipcRenderer.send('persist-local-music-derived', payload),
@@ -278,7 +306,10 @@ contextBridge.exposeInMainWorld('windowApi', {
     checkForUpdate,
     whenNcmApiReady,
     requestNcmApi,
+    submitNcmClientLog,
     requestTrustedResource,
+    requestAudioArrayBuffer,
+    readLocalAudioBuffer,
     clearNcmApiCookies,
     downloadUpdate,
     installUpdate,
