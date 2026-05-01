@@ -124,6 +124,7 @@ export const usePlayerStore = defineStore('playerStore', {
             lyricFollowPosition: 'center', // 歌词激活行位置：top/center/bottom
             globalZoom: 1, // 全局缩放比例
             commentFontSize: 13, // 评论区字体大小
+            lyricOffsetMap: {}, // { [songId]: offsetSeconds } 逐曲歌词时间偏移
         }
     },
     actions: {
@@ -170,6 +171,7 @@ export const usePlayerStore = defineStore('playerStore', {
             'lyricVisualizerRadialCoreSize',
             'globalZoom',
             'commentFontSize',
+            'lyricOffsetMap',
         ]
     },
 })

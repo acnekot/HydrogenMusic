@@ -26,6 +26,13 @@ const {
     time,
 } = storeToRefs(playerStore);
 
+export function getCurrentLyricOffsetSec() {
+    const id = songId.value;
+    if (id == null) return 0;
+    const offset = playerStore.lyricOffsetMap?.[id];
+    return typeof offset === 'number' && Number.isFinite(offset) ? offset : 0;
+}
+
 function getCurrentSong() {
     return getIndexedSong(songList.value, currentIndex.value);
 }
@@ -68,7 +75,8 @@ function rebuildLyricsTimeline() {
 }
 
 export function syncLyricIndexForSeek(seekSeconds) {
-    const nextIndex = findLyricIndexAtTime(lyricsObjArr.value, seekSeconds, LYRIC_INDEX_SYNC_BIAS_SEC);
+    const offset = getCurrentLyricOffsetSec();
+    const nextIndex = findLyricIndexAtTime(lyricsObjArr.value, seekSeconds - offset, LYRIC_INDEX_SYNC_BIAS_SEC);
     applyCurrentLyricIndex(nextIndex);
     return nextIndex;
 }
