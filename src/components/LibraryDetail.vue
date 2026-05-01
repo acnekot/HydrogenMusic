@@ -1132,10 +1132,16 @@ const onAfterLeave = () => (introduceDetailShowDelay.value = false);
         flex: 1;
         min-height: 0;
     }
-    .library-content,
-    .library-content3 {
+    .library-content {
         height: 100%;
         overflow: hidden;
+    }
+    .library-content3 {
+        height: 100%;
+        overflow-y: auto;
+        &::-webkit-scrollbar {
+            width: 0;
+        }
     }
     .library-search-empty {
         height: 100%;
