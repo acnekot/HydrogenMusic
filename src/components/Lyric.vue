@@ -4,7 +4,7 @@ import { changeProgress, musicVideoCheck } from '../utils/player/lazy';
 import { getPlaybackSnapshot, PLAYBACK_TICK_FAST_INTERVAL_MS, subscribePlaybackTick } from '../utils/player/playbackTicker';
 import { usePlayerStore } from '../store/playerStore';
 import { storeToRefs } from 'pinia';
-import { LYRIC_INDEX_SYNC_BIAS_SEC, syncLyricIndexForSeek } from '../composables/usePlayerRuntime';
+import { LYRIC_INDEX_SYNC_BIAS_SEC, syncLyricIndexForSeek, getCurrentLyricOffsetSec } from '../composables/usePlayerRuntime';
 import { getIndexedSong } from '../utils/songList';
 import { getLyricVisualizerAudioEnv } from '../utils/lyricVisualizerAudio';
 
@@ -791,6 +791,43 @@ const hasAnyLyricContent = computed(() => {
 const isLyricDataPending = computed(() => lyricsObjArr.value === null);
 const showMainLyricPanel = computed(() => !widgetState.value && lyricShow.value);
 const showOriginalLyric = computed(() => lyricType.value.includes('original'));
+
+const currentLyricOffset = computed(() => {
+    const id = playerStore.songId;
+    if (id == null) return 0;
+    return playerStore.lyricOffsetMap?.[id] || 0;
+});
+
+function adjustLyricOffset(deltaSec) {
+    const id = playerStore.songId;
+    if (id == null) return;
+    const current = playerStore.lyricOffsetMap?.[id] || 0;
+    const next = Math.max(-10, Math.min(10, Math.round((current + deltaSec) * 10) / 10));
+    if (next === 0) {
+        const { [id]: _, ...rest } = playerStore.lyricOffsetMap || {};
+        playerStore.lyricOffsetMap = rest;
+    } else {
+        playerStore.lyricOffsetMap = { ...playerStore.lyricOffsetMap, [id]: next };
+    }
+    syncLyricIndexForSeek(getPlaybackSnapshot().seek);
+}
+
+function resetLyricOffset() {
+    adjustLyricOffset(-currentLyricOffset.value);
+}
+
+const showOffsetControls = ref(false);
+let lastRightClickTime = 0;
+const handleRightClick = (e) => {
+    const now = Date.now();
+    if (now - lastRightClickTime < 400) {
+        showOffsetControls.value = !showOffsetControls.value;
+        lastRightClickTime = 0;
+    } else {
+        lastRightClickTime = now;
+    }
+};
+
 const showLyricNoData = computed(() => {
     if (!showMainLyricPanel.value) return false;
     if (!showOriginalLyric.value) return true;
@@ -1715,8 +1752,10 @@ const changeProgressLyc = (time, index, item = null) => {
     playerStore.currentLyricIndex = index;
     lyricEle.value = getLyricLineElements();
     syncLyricPosition({ behavior: 'smooth', force: true });
-    progress.value = time;
-    changeProgress(time);
+    const offset = currentLyricOffset.value;
+    const adjustedTime = time + offset;
+    progress.value = adjustedTime;
+    changeProgress(adjustedTime);
 };
 
 // 检测大幅进度跳转（拖动进度条）时立即恢复歌词同步
@@ -1800,7 +1839,7 @@ watch([playing, lyricShow], ([p, show]) => {
 </script>
 
 <template>
-    <div class="lyric-container" :class="{ 'blur-enabled': lyricBlur }">
+    <div class="lyric-container" :class="{ 'blur-enabled': lyricBlur }" @contextmenu.prevent="handleRightClick">
         <canvas
             v-if="shouldShowVisualizer"
             ref="lyricVisualizerCanvas"
@@ -1969,6 +2008,12 @@ watch([playing, lyricShow], ([p, show]) => {
                 <div class="line2"></div>
             </div>
         </Transition>
+
+        <div class="lyric-offset-controls" v-if="showOffsetControls && lyricsObjArr && !isUntimedLyrics">
+            <button class="offset-btn" @click="adjustLyricOffset(-0.5)">-</button>
+            <span class="offset-value" @click="resetLyricOffset" title="点击重置歌词偏移">{{ currentLyricOffset >= 0 ? '+' : '' }}{{ currentLyricOffset.toFixed(1) }}s</span>
+            <button class="offset-btn" @click="adjustLyricOffset(0.5)">+</button>
+        </div>
 
         <span class="song-quality" v-if="currentSong && currentSong.type == 'local'">
             {{ currentSong.sampleRate }}KHz/{{ currentSong.bitsPerSample }}Bits/{{ currentSong.bitrate }}Kpbs
@@ -2305,6 +2350,43 @@ watch([playing, lyricShow], ([p, show]) => {
         .line2 {
             top: 4%;
             right: 4%;
+        }
+    }
+    .lyric-offset-controls {
+        position: absolute;
+        top: 1.5vh;
+        right: 1.5vh;
+        display: flex;
+        align-items: center;
+        gap: 4Px;
+        z-index: 10;
+        opacity: 0.6;
+        transition: opacity 0.2s;
+        &:hover {
+            opacity: 1;
+        }
+        .offset-btn {
+            width: 22Px;
+            height: 22Px;
+            border: none;
+            border-radius: 0;
+            background: rgba(255, 255, 255, 0.15);
+            color: inherit;
+            font-size: 14Px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            &:hover {
+                background: rgba(255, 255, 255, 0.3);
+            }
+        }
+        .offset-value {
+            font: 1.5vh Bender-Bold;
+            min-width: 45Px;
+            text-align: center;
+            cursor: pointer;
+            user-select: none;
         }
     }
     .song-quality {
