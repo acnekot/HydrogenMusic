@@ -1,12 +1,20 @@
 <script setup>
-import { ref, watch, onMounted, onUnmounted, nextTick, computed, reactive } from 'vue';
+import { ref, reactive, watch, onMounted, onUnmounted, nextTick, computed } from 'vue';
 import { changeProgress, musicVideoCheck } from '../utils/player/lazy';
+import { getLyricVisualizerAudioEnv } from '../utils/lyricVisualizerAudio';
 import { getPlaybackSnapshot, PLAYBACK_TICK_FAST_INTERVAL_MS, subscribePlaybackTick } from '../utils/player/playbackTicker';
 import { usePlayerStore } from '../store/playerStore';
 import { storeToRefs } from 'pinia';
-import { LYRIC_INDEX_SYNC_BIAS_SEC, syncLyricIndexForSeek, getCurrentLyricOffsetSec } from '../composables/usePlayerRuntime';
+import { LYRIC_INDEX_SYNC_BIAS_SEC, syncLyricIndexForSeek } from '../composables/usePlayerRuntime';
+import {
+    LYRIC_LINE_OFFSET_STEP_SEC,
+    buildNextLyricLineOffsetStore,
+    formatLyricLineOffset,
+    getDisplayedLyricLineOffset,
+    getLyricOffsetSongKey,
+    normalizeLyricLineOffset,
+} from '../utils/lyricLineOffset';
 import { getIndexedSong } from '../utils/songList';
-import { getLyricVisualizerAudioEnv } from '../utils/lyricVisualizerAudio';
 
 const playerStore = usePlayerStore();
 const {
@@ -19,6 +27,7 @@ const {
     lyricShow,
     lyricEle,
     isLyricDelay,
+    lyricLineOffsets,
     lyricSize,
     tlyricSize,
     rlyricSize,
@@ -26,6 +35,9 @@ const {
     playerChangeSong,
     lyricInterludeTime,
     lyricBlur,
+    time: totalTime,
+    videoIsPlaying,
+    // 魔改：可视化器
     lyricVisualizer,
     lyricVisualizerHeight,
     lyricVisualizerFrequencyMin,
@@ -40,25 +52,23 @@ const {
     lyricVisualizerRadialOffsetX,
     lyricVisualizerRadialOffsetY,
     lyricVisualizerRadialCoreSize,
+    // 魔改：歌词位置
     lyricFollowPosition,
-    videoIsPlaying,
+    // 魔改：当前歌曲
     currentMusic,
 } = storeToRefs(playerStore);
 
+// ====== 魔改：歌词可视化器 ======
 const audioEnv = getLyricVisualizerAudioEnv();
-
-// 歌词可视化器画布引用与容器尺寸状态
 const lyricVisualizerCanvas = ref(null);
 const visualizerContainerSize = reactive({ width: 0, height: 0 });
 
-// 限制数值在范围内，遇到非法输入返回默认值
 const clampNumber = (value, min, max, fallback = min) => {
     const numeric = Number(value);
     if (Number.isNaN(numeric)) return fallback;
     return Math.min(Math.max(numeric, min), max);
 };
 
-// 解析 HEX/RGB 字符串为 RGB 对象，便于绘制使用
 const parseColorToRGB = color => {
     if (!color || typeof color !== 'string') return { r: 0, g: 0, b: 0 };
     const value = color.trim();
@@ -66,18 +76,11 @@ const parseColorToRGB = color => {
         let hex = value.substring(1);
         if (hex.length === 3) hex = hex.split('').map(ch => ch + ch).join('');
         const intVal = parseInt(hex, 16);
-        return {
-            r: (intVal >> 16) & 255,
-            g: (intVal >> 8) & 255,
-            b: intVal & 255,
-        };
+        return { r: (intVal >> 16) & 255, g: (intVal >> 8) & 255, b: intVal & 255 };
     }
     const rgbMatch = value.match(/^rgba?\(([^)]+)\)$/i);
     if (rgbMatch) {
-        const parts = rgbMatch[1]
-            .split(',')
-            .map(part => Number.parseFloat(part.trim()))
-            .filter((_, index) => index < 3);
+        const parts = rgbMatch[1].split(',').map(part => Number.parseFloat(part.trim())).filter((_, index) => index < 3);
         if (parts.length === 3 && parts.every(part => Number.isFinite(part))) {
             return { r: clampNumber(parts[0], 0, 255, 0), g: clampNumber(parts[1], 0, 255, 0), b: clampNumber(parts[2], 0, 255, 0) };
         }
@@ -85,7 +88,6 @@ const parseColorToRGB = color => {
     return { r: 0, g: 0, b: 0 };
 };
 
-// 安全解析数值，失败时使用兜底值
 const fallbackNumber = (value, fallback) => {
     const numeric = Number(value);
     if (Number.isFinite(numeric)) return numeric;
@@ -100,11 +102,7 @@ const VISUALIZER_REFERENCE_CONTAINER_HEIGHT = 720;
 const visualizerBaseHeightPx = computed(() => Math.max(0, fallbackNumber(lyricVisualizerHeight.value ?? 220, 220)));
 const visualizerHeightPx = computed(() => {
     const baseHeight = visualizerBaseHeightPx.value;
-    const containerHeight =
-        visualizerContainerSize.height ||
-        lyricScroll.value?.clientHeight ||
-        lyricVisualizerCanvas.value?.parentElement?.clientHeight ||
-        0;
+    const containerHeight = visualizerContainerSize.height || lyricScroll.value?.clientHeight || lyricVisualizerCanvas.value?.parentElement?.clientHeight || 0;
     if (!containerHeight) return baseHeight;
     if (containerHeight <= baseHeight) return containerHeight;
     const scaleFactor = containerHeight / VISUALIZER_REFERENCE_CONTAINER_HEIGHT;
@@ -119,79 +117,31 @@ const normalizeFrequencyRange = (minValue, maxValue) => {
     let max = fallbackNumber(maxValue ?? DEFAULT_FREQ_MAX, DEFAULT_FREQ_MAX);
     min = clampNumber(Math.round(min), 20, 20000, DEFAULT_FREQ_MIN);
     max = clampNumber(Math.round(max), 20, 20000, DEFAULT_FREQ_MAX);
-    if (min >= max) {
-        if (min >= 19990) { min = 19990; max = 20000; } else { max = Math.min(20000, min + 10); }
-    }
-    if (max - min < 10) {
-        if (min >= 19990) { min = 19990; max = 20000; } else { max = Math.min(20000, min + 10); }
-    }
+    if (min >= max) { if (min >= 19990) { min = 19990; max = 20000; } else { max = Math.min(20000, min + 10); } }
+    if (max - min < 10) { if (min >= 19990) { min = 19990; max = 20000; } else { max = Math.min(20000, min + 10); } }
     return { min, max };
 };
 
-const visualizerFrequencyRange = computed(() =>
-    normalizeFrequencyRange(lyricVisualizerFrequencyMin.value, lyricVisualizerFrequencyMax.value)
-);
+const visualizerFrequencyRange = computed(() => normalizeFrequencyRange(lyricVisualizerFrequencyMin.value, lyricVisualizerFrequencyMax.value));
 const visualizerFrequencyMinValue = computed(() => visualizerFrequencyRange.value.min);
 const visualizerFrequencyMaxValue = computed(() => visualizerFrequencyRange.value.max);
-const visualizerSmoothing = computed(() => {
-    const value = Number(lyricVisualizerTransitionDelay.value);
-    if (Number.isFinite(value)) return Math.min(Math.max(value, 0), 0.95);
-    return 0.75;
-});
-const visualizerBarCountValue = computed(() => {
-    const value = Number(lyricVisualizerBarCount.value);
-    if (!Number.isFinite(value) || value <= 0) return 1;
-    return Math.round(value);
-});
-const visualizerBarWidthRatio = computed(() => {
-    const value = Number(lyricVisualizerBarWidth.value);
-    if (!Number.isFinite(value) || value <= 0) return 0.55;
-    return Math.min(value, 100) / 100;
-});
+const visualizerSmoothing = computed(() => { const v = Number(lyricVisualizerTransitionDelay.value); return Number.isFinite(v) ? Math.min(Math.max(v, 0), 0.95) : 0.75; });
+const visualizerBarCountValue = computed(() => { const v = Number(lyricVisualizerBarCount.value); return (!Number.isFinite(v) || v <= 0) ? 1 : Math.round(v); });
+const visualizerBarWidthRatio = computed(() => { const v = Number(lyricVisualizerBarWidth.value); return (!Number.isFinite(v) || v <= 0) ? 0.55 : Math.min(v, 100) / 100; });
 const visualizerColorRGB = computed(() => {
     if (lyricVisualizerColor.value === 'white') return { r: 255, g: 255, b: 255 };
     if (lyricVisualizerColor.value === 'black') return { r: 0, g: 0, b: 0 };
     return parseColorToRGB(lyricVisualizerColor.value);
 });
-
-const visualizerOpacityValue = computed(() => {
-    const value = Number(lyricVisualizerOpacity.value);
-    if (!Number.isFinite(value)) return 100;
-    return Math.min(Math.max(Math.round(value), 0), 100);
-});
-
-const visualizerOpacityRatio = computed(() => {
-    const ratio = visualizerOpacityValue.value / 100;
-    if (!Number.isFinite(ratio)) return 1;
-    return Math.min(Math.max(ratio, 0), 1);
-});
-
+const visualizerOpacityValue = computed(() => { const v = Number(lyricVisualizerOpacity.value); return Number.isFinite(v) ? Math.min(Math.max(Math.round(v), 0), 100) : 100; });
+const visualizerOpacityRatio = computed(() => { const r = visualizerOpacityValue.value / 100; return Number.isFinite(r) ? Math.min(Math.max(r, 0), 1) : 1; });
 const visualizerStyleValue = computed(() => 'bars');
-
-const visualizerRadialSizeValue = computed(() => {
-    const value = Number(lyricVisualizerRadialSize.value);
-    if (!Number.isFinite(value)) return 100;
-    return clampNumber(Math.round(value), 10, 400, 100);
-});
+const visualizerRadialSizeValue = computed(() => { const v = Number(lyricVisualizerRadialSize.value); return Number.isFinite(v) ? clampNumber(Math.round(v), 10, 400, 100) : 100; });
 const visualizerRadialSizeRatio = computed(() => visualizerRadialSizeValue.value / 100);
-const visualizerRadialOffsetXValue = computed(() => {
-    const value = Number(lyricVisualizerRadialOffsetX.value);
-    if (!Number.isFinite(value)) return 0;
-    return clampNumber(Math.round(value), -100, 100, 0);
-});
-const visualizerRadialOffsetYValue = computed(() => {
-    const value = Number(lyricVisualizerRadialOffsetY.value);
-    if (!Number.isFinite(value)) return 0;
-    return clampNumber(Math.round(value), -100, 100, 0);
-});
-const visualizerRadialCoreSizeValue = computed(() => {
-    const value = Number(lyricVisualizerRadialCoreSize.value);
-    if (!Number.isFinite(value)) return 62;
-    return clampNumber(Math.round(value), 10, 95, 62);
-});
+const visualizerRadialOffsetXValue = computed(() => { const v = Number(lyricVisualizerRadialOffsetX.value); return Number.isFinite(v) ? clampNumber(Math.round(v), -100, 100, 0) : 0; });
+const visualizerRadialOffsetYValue = computed(() => { const v = Number(lyricVisualizerRadialOffsetY.value); return Number.isFinite(v) ? clampNumber(Math.round(v), -100, 100, 0) : 0; });
+const visualizerRadialCoreSizeValue = computed(() => { const v = Number(lyricVisualizerRadialCoreSize.value); return Number.isFinite(v) ? clampNumber(Math.round(v), 10, 95, 62) : 62; });
 const visualizerRadialCoreSizeRatio = computed(() => visualizerRadialCoreSizeValue.value / 100);
-
-// Note: shouldShowVisualizerInLyrics/shouldShowVisualizer/visualizerCanvasStyle are defined after showLyricArea below
 
 let analyserDataArray = null;
 let canvasCtx = null;
@@ -209,29 +159,18 @@ const syncAnalyserConfig = () => {
     const analyser = audioEnv.analyser;
     if (!analyser) return;
     const fftSize = 512;
-    if (analyser.fftSize !== fftSize) {
-        analyser.fftSize = fftSize;
-        analyserDataArray = new Uint8Array(analyser.frequencyBinCount);
-    } else if (!analyserDataArray || analyserDataArray.length !== analyser.frequencyBinCount) {
-        analyserDataArray = new Uint8Array(analyser.frequencyBinCount);
-    }
+    if (analyser.fftSize !== fftSize) { analyser.fftSize = fftSize; analyserDataArray = new Uint8Array(analyser.frequencyBinCount); }
+    else if (!analyserDataArray || analyserDataArray.length !== analyser.frequencyBinCount) { analyserDataArray = new Uint8Array(analyser.frequencyBinCount); }
     analyser.smoothingTimeConstant = visualizerSmoothing.value;
 };
 
 const ensureVisualizerLevels = size => {
-    if (size <= 0) {
-        visualizerBarLevels = null;
-        return visualizerBarLevels;
-    }
-    if (!visualizerBarLevels || visualizerBarLevels.length !== size) {
-        visualizerBarLevels = new Float32Array(size);
-    }
+    if (size <= 0) { visualizerBarLevels = null; return visualizerBarLevels; }
+    if (!visualizerBarLevels || visualizerBarLevels.length !== size) { visualizerBarLevels = new Float32Array(size); }
     return visualizerBarLevels;
 };
 
-const resetVisualizerLevels = () => {
-    visualizerBarLevels = null;
-};
+const resetVisualizerLevels = () => { visualizerBarLevels = null; };
 
 const updateVisualizerLevels = (size, resolveTarget, deltaMultiplier = 1) => {
     const levels = ensureVisualizerLevels(size);
@@ -243,25 +182,14 @@ const updateVisualizerLevels = (size, resolveTarget, deltaMultiplier = 1) => {
         const target = Math.max(0, Math.min(1, resolveTarget(index) ?? 0));
         const current = levels[index] ?? 0;
         let nextValue;
-        if (target >= current) {
-            nextValue = current + (target - current) * attack;
-        } else {
-            const drop = release + current * (0.04 * deltaMultiplier);
-            nextValue = current - Math.min(current - target, drop);
-        }
+        if (target >= current) { nextValue = current + (target - current) * attack; }
+        else { const drop = release + current * (0.04 * deltaMultiplier); nextValue = current - Math.min(current - target, drop); }
         if (!Number.isFinite(nextValue)) nextValue = 0;
         nextValue = Math.max(0, Math.min(1, nextValue));
         levels[index] = nextValue;
         if (nextValue > peak) peak = nextValue;
     }
     return peak;
-};
-
-const renderVisualizerPreview = () => {
-    if (!shouldShowVisualizer.value || !lyricVisualizerCanvas.value) return;
-    if (!animationFrameId) {
-        renderVisualizerFrame();
-    }
 };
 
 const syncVisualizerContainerMetrics = element => {
@@ -285,27 +213,17 @@ const resetVisualizerContainerMetrics = () => {
 
 const updateVisualizerCanvasSize = () => {
     const canvas = lyricVisualizerCanvas.value;
-    if (!canvas) {
-        resetVisualizerContainerMetrics();
-        cachedCanvasDisplayWidth = 0;
-        cachedCanvasDisplayHeight = 0;
-        return;
-    }
+    if (!canvas) { resetVisualizerContainerMetrics(); cachedCanvasDisplayWidth = 0; cachedCanvasDisplayHeight = 0; return; }
     const hostElement = lyricScroll.value || canvas.parentElement || canvas;
     syncVisualizerContainerMetrics(hostElement);
     const displayWidth = Math.max(canvas.clientWidth, visualizerContainerSize.width);
     const displayHeight = Math.max(visualizerCanvasHeightPx.value, canvas.clientHeight || 0);
-    if (!displayWidth || !displayHeight) return;
-    if (!canvasCtx) return;
+    if (!displayWidth || !displayHeight || !canvasCtx) return;
     const dpr = window.devicePixelRatio || 1;
     const targetWidth = Math.round(displayWidth * dpr);
     const targetHeight = Math.round(displayHeight * dpr);
-    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
-        canvas.width = targetWidth;
-        canvas.height = targetHeight;
-    }
-    if (typeof canvasCtx.resetTransform === 'function') canvasCtx.resetTransform();
-    else canvasCtx.setTransform(1, 0, 0, 1, 0, 0);
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) { canvas.width = targetWidth; canvas.height = targetHeight; }
+    if (typeof canvasCtx.resetTransform === 'function') canvasCtx.resetTransform(); else canvasCtx.setTransform(1, 0, 0, 1, 0, 0);
     canvasCtx.scale(dpr, dpr);
     cachedCanvasDisplayWidth = displayWidth;
     cachedCanvasDisplayHeight = displayHeight;
@@ -313,8 +231,7 @@ const updateVisualizerCanvasSize = () => {
 
 const ensureVisualizerSizeTracking = () => {
     updateVisualizerCanvasSize();
-    const target =
-        (showLyricArea.value && lyricScroll.value) || lyricVisualizerCanvas.value?.parentElement || null;
+    const target = (showLyricArea.value && lyricScroll.value) || lyricVisualizerCanvas.value?.parentElement || null;
     if (typeof ResizeObserver !== 'undefined') {
         if (!target) return;
         if (!resizeObserver) {
@@ -323,31 +240,15 @@ const ensureVisualizerSizeTracking = () => {
                 for (const entry of entries) {
                     if (!entry) continue;
                     const { contentRect, target: entryTarget } = entry;
-                    if (contentRect) {
-                        const width = Math.max(0, Math.round(contentRect.width));
-                        const height = Math.max(0, Math.round(contentRect.height));
-                        if (visualizerContainerSize.width !== width || visualizerContainerSize.height !== height) {
-                            visualizerContainerSize.width = width;
-                            visualizerContainerSize.height = height;
-                        }
-                        handled = true;
-                    } else if (entryTarget) {
-                        syncVisualizerContainerMetrics(entryTarget);
-                        handled = true;
-                    }
+                    if (contentRect) { visualizerContainerSize.width = Math.max(0, Math.round(contentRect.width)); visualizerContainerSize.height = Math.max(0, Math.round(contentRect.height)); handled = true; }
+                    else if (entryTarget) { syncVisualizerContainerMetrics(entryTarget); handled = true; }
                 }
                 if (!handled && target) syncVisualizerContainerMetrics(target);
                 updateVisualizerCanvasSize();
             });
         }
-        if (resizeTarget && resizeTarget !== target) {
-            resizeObserver.unobserve(resizeTarget);
-            resizeTarget = null;
-        }
-        if (!resizeTarget) {
-            resizeObserver.observe(target);
-            resizeTarget = target;
-        }
+        if (resizeTarget && resizeTarget !== target) { resizeObserver.unobserve(resizeTarget); resizeTarget = null; }
+        if (!resizeTarget) { resizeObserver.observe(target); resizeTarget = target; }
     } else if (typeof window !== 'undefined' && !resizeHandler) {
         resizeHandler = () => updateVisualizerCanvasSize();
         window.addEventListener('resize', resizeHandler);
@@ -355,18 +256,9 @@ const ensureVisualizerSizeTracking = () => {
 };
 
 const detachVisualizerSizeTracking = () => {
-    if (resizeObserver && resizeTarget) {
-        resizeObserver.unobserve(resizeTarget);
-        resizeTarget = null;
-    }
-    if (resizeObserver && !resizeTarget && typeof resizeObserver.disconnect === 'function') {
-        resizeObserver.disconnect();
-        resizeObserver = null;
-    }
-    if (resizeHandler && typeof window !== 'undefined') {
-        window.removeEventListener('resize', resizeHandler);
-        resizeHandler = null;
-    }
+    if (resizeObserver && resizeTarget) { resizeObserver.unobserve(resizeTarget); resizeTarget = null; }
+    if (resizeObserver && !resizeTarget && typeof resizeObserver.disconnect === 'function') { resizeObserver.disconnect(); resizeObserver = null; }
+    if (resizeHandler && typeof window !== 'undefined') { window.removeEventListener('resize', resizeHandler); resizeHandler = null; }
     resetVisualizerContainerMetrics();
 };
 
@@ -375,56 +267,21 @@ const setupVisualizer = async () => {
     if (!currentMusic.value || !currentMusic.value._sounds || !currentMusic.value._sounds.length) return;
     const audioNode = currentMusic.value._sounds[0]?._node;
     if (!audioNode) return;
-
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) return;
-
-    if (!audioEnv.audioContext) {
-        try {
-            audioEnv.audioContext = new AudioContextClass();
-        } catch (error) {
-            console.warn('创建音频上下文失败:', error);
-            return;
-        }
-    }
-
+    if (!audioEnv.audioContext) { try { audioEnv.audioContext = new AudioContextClass(); } catch (e) { console.warn('创建音频上下文失败:', e); return; } }
     const audioContext = audioEnv.audioContext;
-    if (audioContext.state === 'suspended') {
-        try {
-            await audioContext.resume();
-        } catch (error) {
-            console.warn('恢复音频上下文失败:', error);
-        }
-    }
-
-    if (!audioEnv.analyser) {
-        audioEnv.analyser = audioContext.createAnalyser();
-    }
+    if (audioContext.state === 'suspended') { try { await audioContext.resume(); } catch (_) {} }
+    if (!audioEnv.analyser) { audioEnv.analyser = audioContext.createAnalyser(); }
     syncAnalyserConfig();
-
     const analyser = audioEnv.analyser;
     let source = audioEnv.audioSourceCache.get(audioNode);
-    try {
-        if (!source) {
-            source = audioContext.createMediaElementSource(audioNode);
-            audioEnv.audioSourceCache.set(audioNode, source);
-        }
-    } catch (error) {
-        console.warn('创建音频源失败:', error);
-        return;
-    }
-
+    try { if (!source) { source = audioContext.createMediaElementSource(audioNode); audioEnv.audioSourceCache.set(audioNode, source); } } catch (e) { console.warn('创建音频源失败:', e); return; }
     try { source.disconnect(); } catch (_) {}
     source.connect(analyser);
-
-    if (!audioEnv.analyserConnected) {
-        analyser.connect(audioContext.destination);
-        audioEnv.analyserConnected = true;
-    }
-
+    if (!audioEnv.analyserConnected) { analyser.connect(audioContext.destination); audioEnv.analyserConnected = true; }
     canvasCtx = lyricVisualizerCanvas.value.getContext('2d');
     if (!canvasCtx) return;
-
     ensureVisualizerSizeTracking();
 };
 
@@ -433,68 +290,43 @@ const renderVisualizerFrame = (now = performance.now()) => {
     const width = cachedCanvasDisplayWidth;
     const height = cachedCanvasDisplayHeight;
     if (!width || !height) return true;
-
     const rawDelta = visualizerLastFrameTime > 0 ? now - visualizerLastFrameTime : 16.67;
     const deltaMultiplier = Math.min(rawDelta / 16.67, 3);
     visualizerLastFrameTime = now;
-
     const isPlaying = playing.value;
     const paused = !isPlaying || visualizerPauseState;
-
     const analyser = audioEnv.analyser;
-    if (analyser) {
-        analyser.smoothingTimeConstant = paused ? 0 : visualizerSmoothing.value;
-    }
-    if (!paused && analyser && analyserDataArray) {
-        try { analyser.getByteFrequencyData(analyserDataArray); } catch (_) {}
-    }
-
+    if (analyser) { analyser.smoothingTimeConstant = paused ? 0 : visualizerSmoothing.value; }
+    if (!paused && analyser && analyserDataArray) { try { analyser.getByteFrequencyData(analyserDataArray); } catch (_) {} }
     const { r, g, b } = visualizerColorRGB.value;
     const opacityRatio = visualizerOpacityRatio.value;
     const freqMin = visualizerFrequencyMinValue.value;
     const freqMax = visualizerFrequencyMaxValue.value;
     const barCountRaw = visualizerBarCountValue.value;
     const barWidthRatio = visualizerBarWidthRatio.value;
-
     const nyquist = audioEnv.audioContext ? audioEnv.audioContext.sampleRate / 2 : 22050;
     const binCount = analyserDataArray ? analyserDataArray.length : 0;
     const frequencyMin = Math.max(0, Math.min(freqMin, nyquist));
     const frequencyMax = Math.max(frequencyMin + 10, Math.min(freqMax, nyquist));
-    const minIndex = binCount
-        ? Math.min(binCount - 1, Math.max(0, Math.floor((frequencyMin / nyquist) * binCount)))
-        : 0;
-    const maxIndex = binCount
-        ? Math.max(minIndex + 1, Math.min(binCount, Math.floor((frequencyMax / nyquist) * binCount)))
-        : 1;
+    const minIndex = binCount ? Math.min(binCount - 1, Math.max(0, Math.floor((frequencyMin / nyquist) * binCount))) : 0;
+    const maxIndex = binCount ? Math.max(minIndex + 1, Math.min(binCount, Math.floor((frequencyMax / nyquist) * binCount))) : 1;
     const rangeSize = Math.max(1, maxIndex - minIndex);
     const maxBars = 96;
     const barCount = Math.max(1, Math.min(barCountRaw, maxBars));
     const step = rangeSize / barCount;
-
     const levels = ensureVisualizerLevels(barCount);
     if (!levels) return false;
-
-    const peak = updateVisualizerLevels(
-        barCount,
-        paused
-            ? () => 0
-            : index => {
-                if (!analyserDataArray || !binCount) return 0;
-                const samplePosition = minIndex + (index + 0.5) * step;
-                const dataIndex = Math.min(binCount - 1, Math.max(0, Math.floor(samplePosition)));
-                return analyserDataArray[dataIndex] / 255;
-            },
-        deltaMultiplier
-    );
-
+    const peak = updateVisualizerLevels(barCount, paused ? () => 0 : index => {
+        if (!analyserDataArray || !binCount) return 0;
+        const samplePosition = minIndex + (index + 0.5) * step;
+        const dataIndex = Math.min(binCount - 1, Math.max(0, Math.floor(samplePosition)));
+        return analyserDataArray[dataIndex] / 255;
+    }, deltaMultiplier);
     canvasCtx.clearRect(0, 0, width, height);
-
     if (peak < 0.002) return true;
-
     const barWidth = width / barCount;
     const innerWidth = barWidth * Math.min(Math.max(barWidthRatio, 0.01), 1);
     const offset = (barWidth - innerWidth) / 2;
-
     let lastAlpha = -1;
     for (let i = 0; i < barCount; i++) {
         const value = levels[i] ?? 0;
@@ -505,57 +337,33 @@ const renderVisualizerFrame = (now = performance.now()) => {
         const baseAlpha = 0.15 + value * 0.5;
         const alpha = Math.min(Math.max(baseAlpha * opacityRatio, 0), 1);
         const alphaRounded = Math.round(alpha * 1000) / 1000;
-        if (alphaRounded !== lastAlpha) {
-            canvasCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alphaRounded})`;
-            lastAlpha = alphaRounded;
-        }
+        if (alphaRounded !== lastAlpha) { canvasCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alphaRounded})`; lastAlpha = alphaRounded; }
         canvasCtx.fillRect(x, y, innerWidth, barHeight);
     }
-
     return true;
+};
+
+const renderVisualizerPreview = () => {
+    if (!shouldShowVisualizer.value || !lyricVisualizerCanvas.value) return;
+    if (!animationFrameId) { renderVisualizerFrame(); }
 };
 
 const startVisualizerLoop = ({ force = false } = {}) => {
     if (!shouldShowVisualizer.value || !lyricVisualizerCanvas.value || !canvasCtx) return;
     updateVisualizerCanvasSize();
     visualizerLastFrameTime = 0;
-    if (animationFrameId) {
-        if (!force) return;
-        cancelAnimationFrame(animationFrameId);
-        animationFrameId = null;
-    }
-    const draw = (now) => {
-        const keepGoing = renderVisualizerFrame(now);
-        if (keepGoing === false) {
-            animationFrameId = null;
-            return;
-        }
-        animationFrameId = requestAnimationFrame(draw);
-    };
+    if (animationFrameId) { if (!force) return; cancelAnimationFrame(animationFrameId); animationFrameId = null; }
+    const draw = (now) => { const keepGoing = renderVisualizerFrame(now); if (keepGoing === false) { animationFrameId = null; return; } animationFrameId = requestAnimationFrame(draw); };
     animationFrameId = requestAnimationFrame(draw);
 };
 
 const stopVisualizerLoop = ({ clear = false, teardown = false } = {}) => {
-    if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-        animationFrameId = null;
-    }
-    if (canvasCtx && lyricVisualizerCanvas.value && clear) {
-        const width = cachedCanvasDisplayWidth || lyricVisualizerCanvas.value.clientWidth;
-        const height = cachedCanvasDisplayHeight || lyricVisualizerCanvas.value.clientHeight;
-        canvasCtx.clearRect(0, 0, width, height);
-    }
-    if (clear || teardown) {
-        resetVisualizerLevels();
-        visualizerPauseState = false;
-        cachedCanvasDisplayWidth = 0;
-        cachedCanvasDisplayHeight = 0;
-    }
-    if (teardown) {
-        detachVisualizerSizeTracking();
-        canvasCtx = null;
-    }
+    if (animationFrameId) { cancelAnimationFrame(animationFrameId); animationFrameId = null; }
+    if (canvasCtx && lyricVisualizerCanvas.value && clear) { canvasCtx.clearRect(0, 0, cachedCanvasDisplayWidth || lyricVisualizerCanvas.value.clientWidth, cachedCanvasDisplayHeight || lyricVisualizerCanvas.value.clientHeight); }
+    if (clear || teardown) { resetVisualizerLevels(); visualizerPauseState = false; cachedCanvasDisplayWidth = 0; cachedCanvasDisplayHeight = 0; }
+    if (teardown) { detachVisualizerSizeTracking(); canvasCtx = null; }
 };
+// ====== 魔改：可视化器结束 ======
 
 const lyricScroll = ref();
 const lyricContent = ref();
@@ -589,7 +397,7 @@ const MANUAL_SCROLL_IDLE_MS = 1000;
 const LYRIC_SCROLL_SYNC_TOLERANCE_PX = 2;
 const LYRIC_AUTO_SCROLL_DURATION_MS = 580;
 const LYRIC_AUTO_SCROLL_EASING = 'cubic-bezier(0.4, 0, 0.12, 1)';
-const LYRIC_FOLLOW_TOP_OFFSET_RATIO = 0.38; // fallback，实际由 lyricFollowPosition 决定
+const LYRIC_FOLLOW_TOP_OFFSET_RATIO = 0.38; // fallback, actually decided by lyricFollowPosition
 const LYRIC_FOLLOW_BOTTOM_GUTTER_PX = 180;
 const LYRIC_FOLLOW_VISIBLE_GUTTER_PX = 24;
 const DEFAULT_INTERLUDE_THRESHOLD_SEC = 13;
@@ -621,6 +429,113 @@ const syncingLayout = ref(false);
 const currentSong = computed(() => {
     return getIndexedSong(songList.value, currentIndex.value);
 });
+const lyricOffsetSongKey = computed(() => getLyricOffsetSongKey(currentSong.value));
+const lineOffsetMenu = ref({
+    visible: false,
+    x: 0,
+    y: 0,
+    index: -1,
+    item: null,
+});
+const lineOffsetMenuLabel = computed(() => formatLyricLineOffset(getDisplayedLyricLineOffset(lineOffsetMenu.value.item)));
+const lineOffsetMenuStepText = LYRIC_LINE_OFFSET_STEP_SEC.toFixed(1);
+
+function getCurrentDurationSec() {
+    const songDuration = Math.trunc(Number(currentSong.value?.dt || 0) / 1000);
+    if (songDuration > 0) return songDuration;
+
+    return Math.max(0, Math.floor(Number(totalTime.value) || 0));
+}
+
+function canAdjustLyricLine(item) {
+    if (!showMainLyricPanel.value || isUntimedLyrics.value || item?.untimed) return false;
+    if (!lyricOffsetSongKey.value || !item?.lyricLineKey) return false;
+
+    const originalTime = Number(item.lyricLineOriginalTime);
+    const currentTime = Number(item.time);
+    return Number.isFinite(originalTime) && Number.isFinite(currentTime);
+}
+
+function clampLyricLineTime(index, desiredTime) {
+    const rows = Array.isArray(lyricsObjArr.value) ? lyricsObjArr.value : [];
+    const previousTime = index > 0 ? Number(rows[index - 1]?.time) : 0;
+    const nextTime = index >= 0 && index < rows.length - 1 ? Number(rows[index + 1]?.time) : NaN;
+    const duration = getCurrentDurationSec();
+
+    let minTime = Number.isFinite(previousTime) ? previousTime : 0;
+    let maxTime = Number.isFinite(nextTime) ? nextTime : (duration > 0 ? duration : Infinity);
+    if (maxTime < minTime) maxTime = minTime;
+
+    return Math.min(Math.max(Math.max(0, desiredTime), minTime), maxTime);
+}
+
+function hideLineOffsetMenu() {
+    if (!lineOffsetMenu.value.visible) return;
+    lineOffsetMenu.value = {
+        visible: false,
+        x: 0,
+        y: 0,
+        index: -1,
+        item: null,
+    };
+}
+
+function showLineOffsetMenu(event, item, index) {
+    event.preventDefault();
+    if (!canAdjustLyricLine(item)) {
+        hideLineOffsetMenu();
+        return;
+    }
+
+    const menuWidth = 190;
+    const menuHeight = 150;
+    const x = Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8));
+    const y = Math.min(event.clientY, Math.max(8, window.innerHeight - menuHeight - 8));
+
+    lineOffsetMenu.value = {
+        visible: true,
+        x: Math.max(8, x),
+        y: Math.max(8, y),
+        index,
+        item,
+    };
+}
+
+function updateLineOffset(deltaSec) {
+    const { index, item } = lineOffsetMenu.value;
+    if (!canAdjustLyricLine(item) || !Number.isInteger(index)) {
+        hideLineOffsetMenu();
+        return;
+    }
+
+    const originalTime = Number(item.lyricLineOriginalTime);
+    const currentOffset = getDisplayedLyricLineOffset(item);
+    const nextOffset = normalizeLyricLineOffset(currentOffset + deltaSec);
+    const nextTime = clampLyricLineTime(index, originalTime - nextOffset);
+    const clampedOffset = normalizeLyricLineOffset(originalTime - nextTime);
+
+    playerStore.lyricLineOffsets = buildNextLyricLineOffsetStore(
+        lyricLineOffsets.value,
+        lyricOffsetSongKey.value,
+        item.lyricLineKey,
+        clampedOffset
+    );
+    hideLineOffsetMenu();
+}
+
+function resetLineOffset() {
+    updateLineOffset(-getDisplayedLyricLineOffset(lineOffsetMenu.value.item));
+}
+
+function handleDocumentMouseDown(event) {
+    if (!lineOffsetMenu.value.visible) return;
+    if (event.target?.closest?.('.lyric-line-offset-menu')) return;
+    hideLineOffsetMenu();
+}
+
+function handleDocumentKeyDown(event) {
+    if (event.key === 'Escape') hideLineOffsetMenu();
+}
 
 // —— 每首歌自适应的演唱时长估计模型 ——
 // 以该首歌中“非间奏”的行间间隔，反推每个“文本单位”的平均时长（秒/单位），用于估计单行演唱结束点
@@ -791,43 +706,6 @@ const hasAnyLyricContent = computed(() => {
 const isLyricDataPending = computed(() => lyricsObjArr.value === null);
 const showMainLyricPanel = computed(() => !widgetState.value && lyricShow.value);
 const showOriginalLyric = computed(() => lyricType.value.includes('original'));
-
-const currentLyricOffset = computed(() => {
-    const id = playerStore.songId;
-    if (id == null) return 0;
-    return playerStore.lyricOffsetMap?.[id] || 0;
-});
-
-function adjustLyricOffset(deltaSec) {
-    const id = playerStore.songId;
-    if (id == null) return;
-    const current = playerStore.lyricOffsetMap?.[id] || 0;
-    const next = Math.max(-10, Math.min(10, Math.round((current + deltaSec) * 10) / 10));
-    if (next === 0) {
-        const { [id]: _, ...rest } = playerStore.lyricOffsetMap || {};
-        playerStore.lyricOffsetMap = rest;
-    } else {
-        playerStore.lyricOffsetMap = { ...playerStore.lyricOffsetMap, [id]: next };
-    }
-    syncLyricIndexForSeek(getPlaybackSnapshot().seek);
-}
-
-function resetLyricOffset() {
-    adjustLyricOffset(-currentLyricOffset.value);
-}
-
-const showOffsetControls = ref(false);
-let lastRightClickTime = 0;
-const handleRightClick = (e) => {
-    const now = Date.now();
-    if (now - lastRightClickTime < 400) {
-        showOffsetControls.value = !showOffsetControls.value;
-        lastRightClickTime = 0;
-    } else {
-        lastRightClickTime = now;
-    }
-};
-
 const showLyricNoData = computed(() => {
     if (!showMainLyricPanel.value) return false;
     if (!showOriginalLyric.value) return true;
@@ -838,13 +716,10 @@ const showLyricArea = computed(() => {
     return showMainLyricPanel.value && hasLyricsList.value && hasAnyLyricContent.value && showOriginalLyric.value;
 });
 
-// Visualizer computed props that depend on showLyricArea
+// 魔改：可视化器显示判断（依赖 showLyricArea）
 const shouldShowVisualizerInLyrics = computed(() => lyricVisualizer.value && showLyricArea.value);
 const shouldShowVisualizerInPlaceholder = computed(() => lyricVisualizer.value && !showLyricArea.value);
-const shouldShowVisualizer = computed(
-    () => shouldShowVisualizerInLyrics.value || shouldShowVisualizerInPlaceholder.value
-);
-
+const shouldShowVisualizer = computed(() => shouldShowVisualizerInLyrics.value || shouldShowVisualizerInPlaceholder.value);
 const visualizerCanvasStyle = computed(() => {
     const height = visualizerCanvasHeightPx.value + 'px';
     const base = { height, top: 'auto' };
@@ -871,7 +746,6 @@ function getLyricContentLineElement(index) {
 
 function getLyricFollowTopOffset(scrollEl, wrapperHeight = 0) {
     if (!scrollEl) return 260;
-
     const safeWrapperHeight = Math.max(0, wrapperHeight);
     const pos = lyricFollowPosition.value || 'center';
     let ratio;
@@ -1164,6 +1038,7 @@ function isSameLyricLayoutSignature(prev, next) {
 watch(
     () => lyricsObjArr.value,
     newLyrics => {
+        hideLineOffsetMenu();
         if (newLyrics && newLyrics.length > 0) {
             // 重新根据本首歌的行间隔校准演唱速率
             recomputeSongTimingModel();
@@ -1549,15 +1424,14 @@ function startInterludeProgressSync() {
     );
 }
 
-// Resize 触发同步：容器尺寸改变后重新测量与同步（debounce 避免动画过程中逐帧重算）
+// Resize 触发同步：容器尺寸改变后重新测量与同步
 let lyricResizeObserver = null;
-let resizeDebounceTimer = 0;
+let resizeRaf = 0;
 const scheduleLayout = () => {
-    if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
-    resizeDebounceTimer = setTimeout(async () => {
-        resizeDebounceTimer = 0;
+    if (resizeRaf) cancelAnimationFrame(resizeRaf);
+    resizeRaf = requestAnimationFrame(async () => {
         await applyLyricLayout({ syncBehavior: 'auto' });
-    }, 120);
+    });
 };
 
 // 仅在类型变化时做常规重算（显示/隐藏由可见性观察处理）
@@ -1582,16 +1456,13 @@ watch(
 // 当区域从隐藏 -> 显示时，统一走准备流程；隐藏时立即取消旧的 reveal 任务
 watch(
     showLyricArea,
-    async visible => {
+    visible => {
         if (visible) {
             void prepareLyricReveal();
-            if (shouldShowVisualizer.value) {
-                await nextTick();
-                ensureVisualizerSizeTracking();
-            }
             return;
         }
 
+        hideLineOffsetMenu();
         invalidateLyricReveal();
     },
     { flush: 'post' }
@@ -1602,122 +1473,6 @@ watch(
     () => recalcLyricLayout({ syncBehavior: 'auto' }),
     { flush: 'post' }
 );
-
-// 激活行位置预设变化时重新计算布局
-watch(
-    lyricFollowPosition,
-    () => recalcLyricLayout({ syncBehavior: 'instant' }),
-    { flush: 'post' }
-);
-
-// 可视化器 watches
-watch([visualizerFrequencyMinValue, visualizerFrequencyMaxValue], () => {
-    renderVisualizerPreview();
-});
-
-watch(
-    () => lyricVisualizerHeight.value,
-    value => {
-        const safe = visualizerBaseHeightPx.value;
-        if (value !== safe) lyricVisualizerHeight.value = safe;
-    },
-    { immediate: true }
-);
-
-watch(visualizerHeightPx, () => {
-    nextTick(() => {
-        updateVisualizerCanvasSize();
-        renderVisualizerPreview();
-    });
-});
-
-watch(visualizerBarCountValue, () => {
-    resetVisualizerLevels();
-    renderVisualizerPreview();
-});
-
-watch(visualizerBarWidthRatio, () => {
-    renderVisualizerPreview();
-});
-
-watch(visualizerSmoothing, () => {
-    if (audioEnv.analyser) {
-        syncAnalyserConfig();
-    }
-    renderVisualizerPreview();
-});
-
-watch(visualizerStyleValue, () => {
-    resetVisualizerLevels();
-    nextTick(() => {
-        updateVisualizerCanvasSize();
-        renderVisualizerPreview();
-    });
-});
-
-watch(
-    () => lyricVisualizerColor.value,
-    () => {
-        renderVisualizerPreview();
-    }
-);
-
-watch(
-    () => lyricVisualizerOpacity.value,
-    () => {
-        renderVisualizerPreview();
-    }
-);
-
-watch(
-    () => lyricVisualizerCanvas.value,
-    async canvas => {
-        if (!canvas) {
-            stopVisualizerLoop({ clear: true, teardown: true });
-            canvasCtx = null;
-            return;
-        }
-        await nextTick();
-        updateVisualizerCanvasSize();
-        renderVisualizerPreview();
-        if (!shouldShowVisualizer.value) return;
-        await setupVisualizer();
-        visualizerPauseState = !playing.value;
-        startVisualizerLoop({ force: true });
-    }
-);
-
-watch(shouldShowVisualizer, active => {
-    if (active) {
-        nextTick(async () => {
-            await setupVisualizer();
-            visualizerPauseState = !playing.value;
-            startVisualizerLoop({ force: true });
-        });
-    } else {
-        stopVisualizerLoop({ clear: true, teardown: true });
-    }
-});
-
-watch(
-    () => currentMusic.value,
-    () => {
-        if (!shouldShowVisualizer.value) return;
-        nextTick(async () => {
-            await setupVisualizer();
-            visualizerPauseState = !playing.value;
-            if (playing.value) startVisualizerLoop({ force: true });
-            else startVisualizerLoop();
-        });
-    }
-);
-
-watch(playing, isPlaying => {
-    visualizerPauseState = !isPlaying;
-    if (!shouldShowVisualizer.value) return;
-    if (isPlaying) startVisualizerLoop({ force: true });
-    else startVisualizerLoop();
-});
 
 // 增强版的当前歌词索引监听（统一复用 syncLyricPosition，避免重复逻辑导致状态不一致）
 const { currentLyricIndex } = storeToRefs(playerStore);
@@ -1752,10 +1507,8 @@ const changeProgressLyc = (time, index, item = null) => {
     playerStore.currentLyricIndex = index;
     lyricEle.value = getLyricLineElements();
     syncLyricPosition({ behavior: 'smooth', force: true });
-    const offset = currentLyricOffset.value;
-    const adjustedTime = time + offset;
-    progress.value = adjustedTime;
-    changeProgress(adjustedTime);
+    progress.value = time;
+    changeProgress(time);
 };
 
 // 检测大幅进度跳转（拖动进度条）时立即恢复歌词同步
@@ -1771,17 +1524,65 @@ watch(
     }
 );
 
-onMounted(() => {
-    visualizerPauseState = !playing.value;
-    if (shouldShowVisualizer.value) {
-        nextTick(async () => {
-            await setupVisualizer();
-            visualizerPauseState = !playing.value;
-            startVisualizerLoop({ force: true });
-        });
-    }
+// 魔改：歌词位置变化时重新布局
+watch(
+    lyricFollowPosition,
+    () => recalcLyricLayout({ syncBehavior: 'instant' }),
+    { flush: 'post' }
+);
 
+// 魔改：可视化器配置变化时重新初始化
+watch(shouldShowVisualizer, async (show) => {
+    if (show) {
+        await nextTick();
+        await setupVisualizer();
+        startVisualizerLoop({ force: true });
+        ensureVisualizerSizeTracking();
+    } else {
+        stopVisualizerLoop({ clear: true, teardown: true });
+    }
+});
+
+watch([visualizerSmoothing, visualizerBarCountValue, visualizerBarWidthRatio, visualizerColorRGB, visualizerOpacityRatio, visualizerStyleValue], () => {
+    if (shouldShowVisualizer.value && canvasCtx) { syncAnalyserConfig(); renderVisualizerPreview(); }
+}, { deep: true });
+
+watch([visualizerFrequencyMinValue, visualizerFrequencyMaxValue], () => {
+    if (shouldShowVisualizer.value && canvasCtx) { syncAnalyserConfig(); renderVisualizerPreview(); }
+});
+
+watch(visualizerCanvasHeightPx, () => {
+    if (shouldShowVisualizer.value) { updateVisualizerCanvasSize(); renderVisualizerPreview(); }
+});
+
+watch(lyricVisualizerCanvas, async (canvas) => {
+    if (canvas && shouldShowVisualizer.value) {
+        await nextTick();
+        await setupVisualizer();
+        startVisualizerLoop({ force: true });
+    } else if (!canvas) {
+        stopVisualizerLoop({ clear: true, teardown: true });
+    }
+});
+
+watch(currentMusic, () => {
+    if (!shouldShowVisualizer.value) return;
+    nextTick(async () => {
+        await setupVisualizer();
+        visualizerPauseState = !playing.value;
+        startVisualizerLoop({ force: true });
+    });
+});
+
+watch(playing, (isPlaying) => {
+    if (!shouldShowVisualizer.value) return;
+    visualizerPauseState = !isPlaying;
+    if (isPlaying) { startVisualizerLoop(); }
+});
+
+onMounted(() => {
     lyricWheelHandler = () => {
+        hideLineOffsetMenu();
         enterManualScrollMode();
     };
     if (lyricScroll.value) {
@@ -1798,6 +1599,18 @@ onMounted(() => {
         if (lyricScroll.value) lyricResizeObserver.observe(lyricScroll.value);
     } else {
         window.addEventListener('resize', scheduleLayout);
+    }
+    document.addEventListener('mousedown', handleDocumentMouseDown);
+    document.addEventListener('keydown', handleDocumentKeyDown);
+
+    // 魔改：可视化器初始化
+    visualizerPauseState = !playing.value;
+    if (shouldShowVisualizer.value) {
+        nextTick(async () => {
+            await setupVisualizer();
+            visualizerPauseState = !playing.value;
+            startVisualizerLoop({ force: true });
+        });
     }
 });
 
@@ -1818,7 +1631,10 @@ onUnmounted(() => {
     } else {
         window.removeEventListener('resize', scheduleLayout);
     }
-    if (resizeDebounceTimer) { clearTimeout(resizeDebounceTimer); resizeDebounceTimer = 0; }
+    document.removeEventListener('mousedown', handleDocumentMouseDown);
+    document.removeEventListener('keydown', handleDocumentKeyDown);
+
+    // 魔改：可视化器清理
     stopVisualizerLoop({ clear: true, teardown: true });
     canvasCtx = null;
     analyserDataArray = null;
@@ -1839,7 +1655,7 @@ watch([playing, lyricShow], ([p, show]) => {
 </script>
 
 <template>
-    <div class="lyric-container" :class="{ 'blur-enabled': lyricBlur }" @contextmenu.prevent="handleRightClick">
+    <div class="lyric-container" :class="{ 'blur-enabled': lyricBlur }">
         <canvas
             v-if="shouldShowVisualizer"
             ref="lyricVisualizerCanvas"
@@ -1856,7 +1672,12 @@ watch([playing, lyricShow], ([p, show]) => {
                 <div class="lyric-content" ref="lyricContent">
                 <div class="lyric-spacer" :style="{ height: lyricTopSpacerHeight + 'px' }"></div>
                 <div class="lyric-line" v-for="(item, index) in lyricsObjArr" v-show="item.lyric" :key="index">
-                    <div class="line" @click="changeProgressLyc(item.time, index, item)" :class="{ 'line-highlight': index == lycCurrentIndex, 'lyric-inactive': !isLyricActive || item.active, 'line-static': isUntimedLyrics || item.untimed }">
+                    <div
+                        class="line"
+                        @click="changeProgressLyc(item.time, index, item)"
+                        @contextmenu.stop="showLineOffsetMenu($event, item, index)"
+                        :class="{ 'line-highlight': index == lycCurrentIndex, 'lyric-inactive': !isLyricActive || item.active, 'line-static': isUntimedLyrics || item.untimed }"
+                    >
                         <span class="roma" :style="{ 'font-size': rlyricSize + 'px' }" v-if="item.rlyric && lyricType.indexOf('roma') != -1">{{ item.rlyric }}</span>
                         <span class="original" :style="{ 'font-size': lyricSize + 'px' }" v-if="showOriginalLyric">{{ item.lyric }}</span>
                         <span class="trans" :style="{ 'font-size': tlyricSize + 'px' }" v-if="item.tlyric && lyricType.indexOf('trans') != -1">{{ item.tlyric }}</span>
@@ -2009,10 +1830,37 @@ watch([playing, lyricShow], ([p, show]) => {
             </div>
         </Transition>
 
-        <div class="lyric-offset-controls" v-if="showOffsetControls && lyricsObjArr && !isUntimedLyrics">
-            <button class="offset-btn" @click="adjustLyricOffset(-0.5)">-</button>
-            <span class="offset-value" @click="resetLyricOffset" title="点击重置歌词偏移">{{ currentLyricOffset >= 0 ? '+' : '' }}{{ currentLyricOffset.toFixed(1) }}s</span>
-            <button class="offset-btn" @click="adjustLyricOffset(0.5)">+</button>
+        <div
+            v-if="lineOffsetMenu.visible"
+            class="lyric-line-offset-menu"
+            :style="{ left: lineOffsetMenu.x + 'px', top: lineOffsetMenu.y + 'px' }"
+            @mousedown.stop
+            @click.stop
+            @contextmenu.prevent.stop
+        >
+            <div class="offset-menu-header">
+                <span class="offset-menu-name">歌词偏移</span>
+                <span class="offset-menu-code">OFFSET</span>
+            </div>
+            <div class="offset-menu-current">{{ lineOffsetMenuLabel }}</div>
+            <div class="offset-menu-actions">
+                <button type="button" @click="updateLineOffset(LYRIC_LINE_OFFSET_STEP_SEC)">
+                    <span class="offset-action-main">提前 {{ lineOffsetMenuStepText }} 秒</span>
+                    <span class="offset-action-meta">EARLIER</span>
+                </button>
+                <button type="button" @click="updateLineOffset(-LYRIC_LINE_OFFSET_STEP_SEC)">
+                    <span class="offset-action-main">延后 {{ lineOffsetMenuStepText }} 秒</span>
+                    <span class="offset-action-meta">LATER</span>
+                </button>
+                <button type="button" @click="resetLineOffset">
+                    <span class="offset-action-main">重置本行偏移</span>
+                    <span class="offset-action-meta">RESET</span>
+                </button>
+            </div>
+            <span class="offset-corner offset-corner-tl">+</span>
+            <span class="offset-corner offset-corner-tr">+</span>
+            <span class="offset-corner offset-corner-br">+</span>
+            <span class="offset-corner offset-corner-bl">+</span>
         </div>
 
         <span class="song-quality" v-if="currentSong && currentSong.type == 'local'">
@@ -2041,6 +1889,156 @@ watch([playing, lyricShow], ([p, show]) => {
         z-index: 1;
         opacity: 0.7;
         transition: opacity 0.35s cubic-bezier(0.3, 0, 0.12, 1);
+    }
+    .lyric-line-offset-menu {
+        position: fixed;
+        z-index: 50;
+        width: 190px;
+        padding: 14px 10px 10px;
+        box-sizing: border-box;
+        overflow: hidden;
+        background: rgba(32, 32, 32, 0.96);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 0;
+        box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
+        backdrop-filter: blur(14px);
+        color: #fff !important;
+        font: 12px SourceHanSansCN-Bold;
+        transform-origin: 12px 12px;
+        animation: offset-menu-in 0.16s cubic-bezier(0.3, 0.79, 0.55, 0.99) forwards;
+
+        @keyframes offset-menu-in {
+            0% {
+                opacity: 0;
+                transform: translateY(-4px) scale(0.98);
+            }
+            100% {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        &::before {
+            content: 'OFFSET';
+            position: absolute;
+            right: 8px;
+            bottom: -6px;
+            font: 34px Gilroy-ExtraBold;
+            color: rgba(255, 255, 255, 0.035);
+            letter-spacing: 0;
+            pointer-events: none;
+        }
+
+        .offset-menu-header {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 0 4px 7px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+        }
+
+        .offset-menu-name {
+            color: #fff !important;
+            font: 13px SourceHanSansCN-Bold;
+            line-height: 1;
+        }
+
+        .offset-menu-code {
+            color: rgba(255, 255, 255, 0.38) !important;
+            font: 10px Bender-Bold;
+            line-height: 1;
+        }
+
+        .offset-menu-current {
+            position: relative;
+            z-index: 1;
+            margin: 7px 4px 6px;
+            color: rgba(255, 255, 255, 0.62) !important;
+            font: 11px SourceHanSansCN-Bold;
+            line-height: 1.2;
+        }
+
+        .offset-menu-actions {
+            position: relative;
+            z-index: 1;
+        }
+
+        button {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            width: 100%;
+            height: 31px;
+            border: 0;
+            border-radius: 0;
+            background: transparent !important;
+            color: #fff !important;
+            text-align: left;
+            font: inherit;
+            cursor: pointer;
+            padding: 0 7px;
+            box-sizing: border-box;
+            appearance: none;
+            outline: none;
+            -webkit-tap-highlight-color: transparent;
+            transition: background-color 0.16s, transform 0.16s;
+            &:hover {
+                border-radius: 0;
+                background: rgba(255, 255, 255, 0.09) !important;
+            }
+            &:focus,
+            &:focus-visible {
+                outline: none;
+                box-shadow: none;
+            }
+            &:active {
+                background: rgba(255, 255, 255, 0.09) !important;
+                transform: scale(0.97);
+            }
+        }
+
+        .offset-action-main {
+            color: inherit !important;
+            white-space: nowrap;
+        }
+
+        .offset-action-meta {
+            color: rgba(255, 255, 255, 0.35) !important;
+            font: 9px Bender-Bold;
+            white-space: nowrap;
+        }
+
+        .offset-corner {
+            position: absolute;
+            color: rgba(255, 255, 255, 0.28) !important;
+            font: 12px Bender-Bold;
+            line-height: 1;
+            pointer-events: none;
+        }
+
+        .offset-corner-tl {
+            top: 2px;
+            left: 4px;
+        }
+
+        .offset-corner-tr {
+            top: 2px;
+            right: 4px;
+        }
+
+        .offset-corner-br {
+            right: 4px;
+            bottom: 2px;
+        }
+
+        .offset-corner-bl {
+            bottom: 2px;
+            left: 4px;
+        }
     }
     .lyric-area {
         width: calc(100% - 3vh);
@@ -2352,43 +2350,6 @@ watch([playing, lyricShow], ([p, show]) => {
             right: 4%;
         }
     }
-    .lyric-offset-controls {
-        position: absolute;
-        top: 1.5vh;
-        right: 1.5vh;
-        display: flex;
-        align-items: center;
-        gap: 4Px;
-        z-index: 10;
-        opacity: 0.6;
-        transition: opacity 0.2s;
-        &:hover {
-            opacity: 1;
-        }
-        .offset-btn {
-            width: 22Px;
-            height: 22Px;
-            border: none;
-            border-radius: 0;
-            background: rgba(255, 255, 255, 0.15);
-            color: inherit;
-            font-size: 14Px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            &:hover {
-                background: rgba(255, 255, 255, 0.3);
-            }
-        }
-        .offset-value {
-            font: 1.5vh Bender-Bold;
-            min-width: 45Px;
-            text-align: center;
-            cursor: pointer;
-            user-select: none;
-        }
-    }
     .song-quality {
         font: 1.5vh Bender-Bold;
         color: black;
@@ -2431,6 +2392,7 @@ watch([playing, lyricShow], ([p, show]) => {
         left: $boderPosition;
     }
 }
+
 .fade-enter-active {
     transition: opacity 0.25s cubic-bezier(0.3, 0.79, 0.55, 0.99) !important;
 }

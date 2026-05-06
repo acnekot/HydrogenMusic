@@ -3,7 +3,9 @@ import { storeToRefs } from 'pinia';
 import pinia from '../store/pinia';
 import { usePlayerStore } from '../store/playerStore';
 import { buildLyricsTimeline, findLyricIndexAtTime } from '../utils/lyricCore';
+import { applyLyricLineOffsets, getLyricOffsetSongKey } from '../utils/lyricLineOffset';
 import { getPlaybackSnapshot, PLAYBACK_TICK_FAST_INTERVAL_MS, subscribePlaybackTick } from '../utils/player/playbackTicker';
+import { hasUsableLyricPayload } from '../utils/player/lyricPayload';
 import { getIndexedSong } from '../utils/songList';
 
 export const LYRIC_INDEX_SYNC_BIAS_SEC = 0.2;
@@ -19,19 +21,13 @@ const {
     currentIndex,
     currentLyricIndex,
     lyric,
+    lyricLineOffsets,
     lyricsObjArr,
     playing,
     songId,
     songList,
     time,
 } = storeToRefs(playerStore);
-
-export function getCurrentLyricOffsetSec() {
-    const id = songId.value;
-    if (id == null) return 0;
-    const offset = playerStore.lyricOffsetMap?.[id];
-    return typeof offset === 'number' && Number.isFinite(offset) ? offset : 0;
-}
 
 function getCurrentSong() {
     return getIndexedSong(songList.value, currentIndex.value);
@@ -65,18 +61,22 @@ function rebuildLyricsTimeline() {
         return;
     }
 
+    const currentSong = getCurrentSong();
     const timeline = buildLyricsTimeline(lyric.value, {
         songDurationSec: getCurrentSongDurationSec(),
-        isLocal: getCurrentSong()?.type === 'local',
+        isLocal: currentSong?.type === 'local',
     });
 
-    playerStore.lyricsObjArr = timeline;
+    playerStore.lyricsObjArr = applyLyricLineOffsets(
+        timeline,
+        lyricLineOffsets.value,
+        getLyricOffsetSongKey(currentSong)
+    );
     syncLyricIndexForSeek(getPlaybackSnapshot().seek);
 }
 
 export function syncLyricIndexForSeek(seekSeconds) {
-    const offset = getCurrentLyricOffsetSec();
-    const nextIndex = findLyricIndexAtTime(lyricsObjArr.value, seekSeconds - offset, LYRIC_INDEX_SYNC_BIAS_SEC);
+    const nextIndex = findLyricIndexAtTime(lyricsObjArr.value, seekSeconds, LYRIC_INDEX_SYNC_BIAS_SEC);
     applyCurrentLyricIndex(nextIndex);
     return nextIndex;
 }
@@ -108,7 +108,7 @@ export function initLyricRuntime() {
     );
 
     unwatchLyric = watch(
-        () => lyric.value,
+        () => [lyric.value, lyricLineOffsets.value],
         () => {
             rebuildLyricsTimeline();
         },

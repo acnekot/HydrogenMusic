@@ -76,6 +76,7 @@ HydrogenMusic-main/
 | `quality` | 当前音质 |
 | `lyric` / `lyricsObjArr` | 歌词原始文本 / 解析后的对象数组 |
 | `currentLyricIndex` | 当前歌词行索引（桌面歌词同步用） |
+| `lyricLineOffsets` | 按歌曲保存的逐行歌词时间偏移（上游新增，替代原 `lyricOffsetMap`） |
 | `lyricSize/tlyricSize/rlyricSize` | 歌词/翻译/罗马音字体大小 |
 | `lyricInterludeTime` | 歌词间奏等待时间 |
 | `showSongTranslation` | 是否显示歌曲翻译名 |
@@ -152,12 +153,13 @@ HydrogenMusic-main/
 #### `player.js` ⭐ 播放器核心
 - 基于 **Howler.js** 实现音频播放
 - 管理播放/暂停、切歌、进度、音量
-- 歌词加载与解析入口
+- 歌词加载与解析入口（支持云盘歌曲歌词回退）
 - 调用 `musicUrlResolver.js` 解析播放链接
 - 调用 `quality.js` 选择最优音质
 - 与 `player/playlistPersistence.js` 协作持久化播放列表
 - 与 `player/externalBridge.js` 协作暴露外部控制（MPRIS/托盘）
 - 与 `player/playbackTicker.js` 协作心跳 tick（进度更新）
+- `syncCloudDiskSongsFromItems()` 同步云盘歌曲到播放列表
 
 #### `initApp.js` ⭐ 应用初始化
 两阶段初始化：
@@ -196,6 +198,13 @@ clearCachedSettingsSnapshot()                 // 清空缓存
 - 翻译歌词、罗马音歌词合并
 - 歌词行索引二分查找
 
+#### `lyricLineOffset.js`（上游新增）
+- 逐行歌词时间偏移系统
+- `applyLyricLineOffsets()` 将偏移应用到歌词时间线
+- `buildNextLyricLineOffsetStore()` 构建下一次偏移存储
+- `getLyricOffsetSongKey()` 获取歌曲偏移键
+- 右键歌词行弹出偏移菜单，支持 ±0.5s 步进调整
+
 #### `lyricVisualizerAudio.js`（魔改新增）
 - Web Audio API 音频分析节点封装
 - 频谱数据采集，供 `Lyric.vue` 的 Canvas 绘制使用
@@ -231,6 +240,18 @@ clearCachedSettingsSnapshot()                 // 清空缓存
 #### `commentScrollMemory.js`
 - 记忆评论区滚动位置
 
+#### `player/lyricFallback.js`（上游新增）
+- 云盘歌曲歌词回退系统
+- `getLyricWithCloudFallback()` 带云盘回退的歌词获取
+- `isCloudDiskSong()` / `markCloudDiskSong()` 云盘歌曲标识
+- 支持从云盘文件元数据中提取内嵌歌词
+
+#### `player/lyricPayload.js`（上游更新）
+- 歌词数据载荷处理
+- `createEmptyLyric()` 创建空歌词
+- `hasUsableLyricPayload()` 检查歌词是否可用
+- 支持内嵌歌词解析（LRC 格式和纯文本）
+
 ---
 
 ### 4. Electron IPC (`src/electron/`)
@@ -260,6 +281,15 @@ windowApi.closeDesktopLyric()     // 关闭桌面歌词
 - 对接 `electron-store` 读写 `settingsStore.json`
 - 窗口最大化/最小化/关闭
 - 下载文件、本地音乐扫描
+
+#### `ncmCloudUpload.js`（上游新增）
+- 网易云音乐云盘上传模块
+- 通过 NCM API 上传本地歌曲到云盘
+- 支持上传进度回调
+
+#### `services.js`（上游新增）
+- Electron 主进程服务注册
+- 云盘上传服务 IPC 处理器
 
 #### `shortcuts.js`
 - 全局快捷键注册（Electron `globalShortcut`）

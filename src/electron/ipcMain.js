@@ -1,8 +1,8 @@
-const { ipcMain, shell, dialog, globalShortcut, Menu, clipboard, BrowserWindow } = require('electron')
+const { ipcMain, shell, dialog, globalShortcut, Menu, clipboard } = require('electron')
 const axios = require('axios')
 const fs = require('fs')
 const path = require('path')
-const { parseFile } = require('music-metadata')
+const { parseFile, parseBuffer } = require('music-metadata')
 const { spawn } = require('child_process')
 const { loadLocalLyricPayload } = require('./localLyrics')
 const { registerSettingsIpc } = require('./ipc/settingsIpc')
@@ -724,27 +724,33 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     ipcMain.on('download-start', () => {
         win.webContents.send('download-next')
     })
+
+    const getPictureScore = pic => {
+        if (!pic || !pic.data) return -1
+        const type = `${pic.type || ''} ${pic.description || ''}`.toLowerCase()
+        const isFrontCover = type.includes('front') || type.includes('cover')
+        return getBufferLength(pic.data) + (isFrontCover ? 2 * 1024 * 1024 : 0)
+    }
+    const getBestPictureDataUrl = metadata => {
+        const picArr = metadata && metadata.common && Array.isArray(metadata.common.picture) ? metadata.common.picture : null
+        const pic = picArr && picArr.length > 0
+            ? picArr.slice().sort((a, b) => getPictureScore(b) - getPictureScore(a))[0]
+            : null
+        if (!pic || !pic.data) return null
+
+        const mime = getImageMime(pic.format, pic.data)
+        return `data:${mime};base64,${Buffer.from(pic.data).toString('base64')}`
+    }
+
     ipcMain.handle('get-image-base64', async (e, filePath) => {
         const normalizedFilePath = normalizeAllowedMediaPath(filePath)
         if (!normalizedFilePath) return null
 
         try {
-            const getPictureScore = pic => {
-                if (!pic || !pic.data) return -1
-                const type = `${pic.type || ''} ${pic.description || ''}`.toLowerCase()
-                const isFrontCover = type.includes('front') || type.includes('cover')
-                return getBufferLength(pic.data) + (isFrontCover ? 2 * 1024 * 1024 : 0)
-            }
             // 显式禁用跳过封面，避免新版库默认不读取封面
             const data = await parseFile(normalizedFilePath, { skipCovers: false }).catch(() => null)
-            const picArr = data && data.common && Array.isArray(data.common.picture) ? data.common.picture : null
-            const pic = picArr && picArr.length > 0
-                ? picArr.slice().sort((a, b) => getPictureScore(b) - getPictureScore(a))[0]
-                : null
-            if (pic && pic.data) {
-                const mime = getImageMime(pic.format, pic.data)
-                return `data:${mime};base64,${Buffer.from(pic.data).toString('base64')}`
-            }
+            const embeddedCover = getBestPictureDataUrl(data)
+            if (embeddedCover) return embeddedCover
 
             // 若无内嵌封面，尝试同名图片或常见封面文件
             const parsed = path.parse(normalizedFilePath)
@@ -778,6 +784,21 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
         }
         return null
     })
+
+    ipcMain.handle('get-audio-cover-base64-buffer', async (e, fileBuffer, mimeType) => {
+        try {
+            if (!fileBuffer) return null
+            const buffer = Buffer.isBuffer(fileBuffer)
+                ? fileBuffer
+                : Buffer.from(fileBuffer)
+            if (!buffer.length) return null
+
+            const data = await parseBuffer(buffer, mimeType || undefined, { skipCovers: false }).catch(() => null)
+            return getBestPictureDataUrl(data)
+        } catch (_) {
+            return null
+        }
+    })
     registerSettingsIpc({ ipcMain, settingsStore, win, registerShortcuts })
     ipcMain.handle('system-fonts:list', () => listSystemFonts())
     const handleOpenDirectoryDialog = async () => {
@@ -790,18 +811,6 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     }
     ipcMain.handle('dialog:openDirectory', handleOpenDirectoryDialog)
     ipcMain.handle('dialog:openFile', handleOpenDirectoryDialog)
-    ipcMain.handle('dialog:openImageFile', async () => {
-        const { canceled, filePaths } = await dialog.showOpenDialog({
-            properties: ['openFile'],
-            filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'] }],
-        })
-        if (canceled) return null
-        return filePaths && filePaths.length ? filePaths[0] : null
-    })
-    ipcMain.on('set-zoom', (e, factor) => {
-        const zoom = Math.max(0.5, Math.min(3, Number(factor) || 1))
-        win.webContents.setZoomFactor(zoom)
-    })
     ipcMain.on('register-shortcuts', () => {
         registerShortcuts(win, app)
     })

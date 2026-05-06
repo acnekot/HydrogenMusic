@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 const { pathToFileURL } = require('url')
 const TRUSTED_RESOURCE_ERROR_MARKER = '__hydrogenMusicTrustedResourceError'
 
@@ -218,10 +218,6 @@ function sendPlayerCurrentTrackTime(t) {
   ipcRenderer.send("playerCurrentTrackTime", t)
 }
 
-function setZoom(factor) {
-    ipcRenderer.send('set-zoom', factor)
-}
-
 function toFileUrl(filePathOrUrl) {
     if (!filePathOrUrl || typeof filePathOrUrl !== 'string') return ''
     const value = filePathOrUrl.trim()
@@ -266,6 +262,13 @@ contextBridge.exposeInMainWorld('windowApi', {
     localMusicFiles,
     localMusicCount,
     getLocalMusicImage: (filePath) => ipcRenderer.invoke('get-image-base64', filePath),
+    getPathForFile: (file) => {
+        try {
+            if (webUtils && typeof webUtils.getPathForFile === 'function') return webUtils.getPathForFile(file)
+        } catch (_) {}
+        return file && typeof file.path === 'string' ? file.path : ''
+    },
+    getAudioCoverFromBuffer: (buffer, mimeType) => ipcRenderer.invoke('get-audio-cover-base64-buffer', buffer, mimeType),
     toFileUrl,
     playOrPauseMusic,
     playOrPauseMusicCheck,
@@ -281,7 +284,6 @@ contextBridge.exposeInMainWorld('windowApi', {
     getSystemFonts: () => ipcRenderer.invoke('system-fonts:list'),
     openDirectory: () => ipcRenderer.invoke('dialog:openFile'),
     openFile: () => ipcRenderer.invoke('dialog:openFile'),
-    openImageFile: () => ipcRenderer.invoke('dialog:openImageFile'),
     clearLocalMusicData,
     persistLocalMusicDerived: (payload) => ipcRenderer.send('persist-local-music-derived', payload),
     registerShortcuts,
@@ -317,7 +319,6 @@ contextBridge.exposeInMainWorld('windowApi', {
     setWindowTile,
     updatePlaylistStatus,
     updateDockMenu,
-    setZoom,
 })
 
 // 新的API用于处理登录功能和桌面歌词
