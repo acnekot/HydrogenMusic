@@ -15,6 +15,20 @@
 
 ---
 
+## Git 工作流 ⭐ 强制规则
+
+**每次完成代码改动后必须 commit + push，使用中文 commit 消息。**
+
+- **远端**：只 push 到 fork (`acnekot/HydrogenMusic`)，**绝对不要** push 到上游 (`ldx123000/Hydrogen-Music`)
+- **分支**：默认 push 当前分支（通常是 `main`），使用 `git push origin <branch>`
+- **commit 消息**：用中文写，简明描述本次改动的目的（例如：`修复无缝衔接后可视化器消失`、`回退淡入淡出时长设置`）
+- **粒度**：每完成一个逻辑单元（修一个 bug、加一个功能、回退一组改动）就 commit 一次，不要批量堆积
+- **执行时机**：用户没有明确说"先别 push" 时，完成改动后立即 commit + push
+- **禁止**：不要 `--no-verify` 跳过 hooks，不要 `--force` 推送
+- 临时脚本（如批量修改用的 .cjs）用完就删，不要 commit 进去
+
+---
+
 ## 目录结构
 
 ```
