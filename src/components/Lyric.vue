@@ -4,6 +4,7 @@ import { changeProgress, musicVideoCheck } from '../utils/player/lazy';
 import { getLyricVisualizerAudioEnv } from '../utils/lyricVisualizerAudio';
 import { getPlaybackSnapshot, PLAYBACK_TICK_FAST_INTERVAL_MS, subscribePlaybackTick } from '../utils/player/playbackTicker';
 import { usePlayerStore } from '../store/playerStore';
+import { usePluginStore } from '../store/pluginStore';
 import { storeToRefs } from 'pinia';
 import { LYRIC_INDEX_SYNC_BIAS_SEC, syncLyricIndexForSeek } from '../composables/usePlayerRuntime';
 import {
@@ -17,6 +18,7 @@ import {
 import { getIndexedSong } from '../utils/songList';
 
 const playerStore = usePlayerStore();
+const pluginStore = usePluginStore();
 const {
     playing,
     progress,
@@ -144,6 +146,11 @@ const visualizerRadialCoreSizeValue = computed(() => { const v = Number(lyricVis
 const visualizerRadialCoreSizeRatio = computed(() => visualizerRadialCoreSizeValue.value / 100);
 
 let analyserDataArray = null;
+    activeAnalyser = null;
+    activeAudioContext = null;
+let activeAnalyser = null;
+let activeAudioContext = null;
+const webAudioPlayerAnalyserCache = new WeakMap();
 let canvasCtx = null;
 let animationFrameId = null;
 let resizeObserver = null;
@@ -155,8 +162,8 @@ let visualizerLastFrameTime = 0;
 let cachedCanvasDisplayWidth = 0;
 let cachedCanvasDisplayHeight = 0;
 
-const syncAnalyserConfig = () => {
-    const analyser = audioEnv.analyser;
+const syncAnalyserConfig = (target = activeAnalyser) => {
+    const analyser = target;
     if (!analyser) return;
     const fftSize = 512;
     if (analyser.fftSize !== fftSize) { analyser.fftSize = fftSize; analyserDataArray = new Uint8Array(analyser.frequencyBinCount); }
@@ -264,26 +271,54 @@ const detachVisualizerSizeTracking = () => {
 
 const setupVisualizer = async () => {
     if (!shouldShowVisualizer.value || !lyricVisualizerCanvas.value) return;
-    if (!currentMusic.value || !currentMusic.value._sounds || !currentMusic.value._sounds.length) return;
-    const audioNode = currentMusic.value._sounds[0]?._node;
-    if (!audioNode) return;
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
-    if (!audioEnv.audioContext) { try { audioEnv.audioContext = new AudioContextClass(); } catch (e) { console.warn('创建音频上下文失败:', e); return; } }
-    const audioContext = audioEnv.audioContext;
-    if (audioContext.state === 'suspended') { try { await audioContext.resume(); } catch (_) {} }
-    if (!audioEnv.analyser) { audioEnv.analyser = audioContext.createAnalyser(); }
-    syncAnalyserConfig();
-    const analyser = audioEnv.analyser;
-    let source = audioEnv.audioSourceCache.get(audioNode);
-    try { if (!source) { source = audioContext.createMediaElementSource(audioNode); audioEnv.audioSourceCache.set(audioNode, source); } } catch (e) { console.warn('创建音频源失败:', e); return; }
-    try { source.disconnect(); } catch (_) {}
-    source.connect(analyser);
-    if (!audioEnv.analyserConnected) { analyser.connect(audioContext.destination); audioEnv.analyserConnected = true; }
+    const player = currentMusic.value;
+    if (!player) return;
+    const isWebAudioPlayer = player.__hmWebAudioPlayer === true;
+    let analyser = null;
+    let audioContext = null;
+    if (isWebAudioPlayer) {
+        // Gapless WebAudio player path: tap analyser onto player's own gain node.
+        const playerCtx = player._context;
+        const playerGain = player._gain;
+        if (!playerCtx || !playerGain) return;
+        if (playerCtx.state === 'suspended') { try { await playerCtx.resume(); } catch (_) {} }
+        let cached = webAudioPlayerAnalyserCache.get(player);
+        if (!cached) {
+            try {
+                const newAnalyser = playerCtx.createAnalyser();
+                playerGain.connect(newAnalyser);
+                cached = newAnalyser;
+                webAudioPlayerAnalyserCache.set(player, cached);
+            } catch (e) { console.warn('WebAudio 可视化挂载失败:', e); return; }
+        }
+        analyser = cached;
+        audioContext = playerCtx;
+    } else {
+        // Howler HTMLAudioElement path (original logic).
+        if (!player._sounds || !player._sounds.length) return;
+        const audioNode = player._sounds[0]?._node;
+        if (!audioNode) return;
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return;
+        if (!audioEnv.audioContext) { try { audioEnv.audioContext = new AudioContextClass(); } catch (e) { console.warn('创建音频上下文失败:', e); return; } }
+        audioContext = audioEnv.audioContext;
+        if (audioContext.state === 'suspended') { try { await audioContext.resume(); } catch (_) {} }
+        if (!audioEnv.analyser) { audioEnv.analyser = audioContext.createAnalyser(); }
+        analyser = audioEnv.analyser;
+        let source = audioEnv.audioSourceCache.get(audioNode);
+        try { if (!source) { source = audioContext.createMediaElementSource(audioNode); audioEnv.audioSourceCache.set(audioNode, source); } } catch (e) { console.warn('创建音频源失败:', e); return; }
+        try { source.disconnect(); } catch (_) {}
+        source.connect(analyser);
+        if (!audioEnv.analyserConnected) { analyser.connect(audioContext.destination); audioEnv.analyserConnected = true; }
+    }
+    activeAnalyser = analyser;
+    activeAudioContext = audioContext;
+    syncAnalyserConfig(analyser);
     canvasCtx = lyricVisualizerCanvas.value.getContext('2d');
     if (!canvasCtx) return;
     ensureVisualizerSizeTracking();
 };
+
 
 const renderVisualizerFrame = (now = performance.now()) => {
     if (!shouldShowVisualizer.value || !canvasCtx || !lyricVisualizerCanvas.value) return false;
@@ -295,7 +330,7 @@ const renderVisualizerFrame = (now = performance.now()) => {
     visualizerLastFrameTime = now;
     const isPlaying = playing.value;
     const paused = !isPlaying || visualizerPauseState;
-    const analyser = audioEnv.analyser;
+    const analyser = activeAnalyser;
     if (analyser) { analyser.smoothingTimeConstant = paused ? 0 : visualizerSmoothing.value; }
     if (!paused && analyser && analyserDataArray) { try { analyser.getByteFrequencyData(analyserDataArray); } catch (_) {} }
     const { r, g, b } = visualizerColorRGB.value;
@@ -304,7 +339,7 @@ const renderVisualizerFrame = (now = performance.now()) => {
     const freqMax = visualizerFrequencyMaxValue.value;
     const barCountRaw = visualizerBarCountValue.value;
     const barWidthRatio = visualizerBarWidthRatio.value;
-    const nyquist = audioEnv.audioContext ? audioEnv.audioContext.sampleRate / 2 : 22050;
+    const nyquist = activeAudioContext ? activeAudioContext.sampleRate / 2 : 22050;
     const binCount = analyserDataArray ? analyserDataArray.length : 0;
     const frequencyMin = Math.max(0, Math.min(freqMin, nyquist));
     const frequencyMax = Math.max(frequencyMin + 10, Math.min(freqMax, nyquist));
@@ -717,8 +752,9 @@ const showLyricArea = computed(() => {
 });
 
 // 魔改：可视化器显示判断（依赖 showLyricArea）
-const shouldShowVisualizerInLyrics = computed(() => lyricVisualizer.value && showLyricArea.value);
-const shouldShowVisualizerInPlaceholder = computed(() => lyricVisualizer.value && !showLyricArea.value);
+const lyricVisualizerPluginEnabled = computed(() => pluginStore.isEnabled('lyric-visualizer'));
+const shouldShowVisualizerInLyrics = computed(() => lyricVisualizerPluginEnabled.value && lyricVisualizer.value && showLyricArea.value);
+const shouldShowVisualizerInPlaceholder = computed(() => lyricVisualizerPluginEnabled.value && lyricVisualizer.value && !showLyricArea.value);
 const shouldShowVisualizer = computed(() => shouldShowVisualizerInLyrics.value || shouldShowVisualizerInPlaceholder.value);
 const visualizerCanvasStyle = computed(() => {
     const height = visualizerCanvasHeightPx.value + 'px';
