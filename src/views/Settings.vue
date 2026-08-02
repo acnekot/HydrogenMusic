@@ -739,6 +739,7 @@ const clearFmRecent = () => {
                                 </div>
                             </div>
                         </div>
+                        <AppearanceSettings v-model:search-assist-limit="searchAssistLimit" />
                         <div class="option">
                             <div class="option-name">歌曲无缝衔接</div>
                             <div class="option-operation">
@@ -759,12 +760,6 @@ const clearFmRecent = () => {
                                         <div class="toggle-on" v-show="playerStore.audioVisualizer"></div>
                                     </Transition>
                                 </div>
-                            </div>
-                        </div>
-                        <div class="option">
-                            <div class="option-name">搜索下拉条目数量</div>
-                            <div class="option-operation">
-                                <input v-model="searchAssistLimit" name="searchAssistLimit" />
                             </div>
                         </div>
                         <div class="option">
@@ -810,7 +805,6 @@ const clearFmRecent = () => {
                         </div>
                     </div>
                 </div>
-                <AppearanceSettings />
                 <div class="settings-item">
                     <h2 class="item-title">本地</h2>
                     <div class="line"></div>
