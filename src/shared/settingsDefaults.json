@@ -21,7 +21,6 @@
       "searchAssistLimit": 8,
       "showSongTranslation": true,
       "gaplessPlayback": false,
-      "audioVisualizer": false,
       "lyricFollowPosition": "center",
       "lyricVisualizer": false,
       "lyricVisualizerHeight": 220,

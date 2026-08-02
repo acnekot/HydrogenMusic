@@ -25,7 +25,6 @@ const {
     searchAssistLimit,
     showSongTranslation,
     gaplessPlayback,
-    audioVisualizer,
     localHifiOutput,
     localHifiOutputMode,
     localHifiMpvPath,
@@ -231,7 +230,6 @@ export function applySettingsSnapshot(settings, options = {}) {
     searchAssistLimit.value = normalizedSettings?.music?.searchAssistLimit
     showSongTranslation.value = normalizedSettings?.music?.showSongTranslation !== false
     gaplessPlayback.value = normalizedSettings?.music?.gaplessPlayback === true
-    audioVisualizer.value = normalizedSettings?.music?.audioVisualizer === true
     localHifiOutput.value = normalizedSettings?.music?.localHifiOutput === true
     localHifiOutputMode.value = resolveInitialHifiOutputMode(normalizedSettings?.music?.localHifiOutputMode)
     localHifiMpvPath.value = normalizedSettings?.music?.localHifiMpvPath || ''

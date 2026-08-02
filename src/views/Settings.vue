@@ -146,7 +146,6 @@ const applySettingsToForm = settings => {
     searchAssistLimit.value = normalizedSettings.music.searchAssistLimit
     playerStore.showSongTranslation = normalizedSettings.music.showSongTranslation !== false
     playerStore.gaplessPlayback = normalizedSettings.music.gaplessPlayback === true
-    playerStore.audioVisualizer = normalizedSettings.music.audioVisualizer === true
     playerStore.localHifiOutput = normalizedSettings.music.localHifiOutput === true
     playerStore.localHifiOutputMode = resolveInitialHifiOutputMode(normalizedSettings.music.localHifiOutputMode)
     playerStore.localHifiMpvPath = normalizedSettings.music.localHifiMpvPath
@@ -271,7 +270,6 @@ const setAppSettings = () => {
             searchAssistLimit: searchAssistLimit.value,
             showSongTranslation: playerStore.showSongTranslation,
             gaplessPlayback: playerStore.gaplessPlayback,
-            audioVisualizer: playerStore.audioVisualizer,
             localHifiOutput: playerStore.localHifiOutput,
             localHifiOutputMode: playerStore.localHifiOutputMode,
             localHifiMpvPath: playerStore.localHifiMpvPath,
@@ -511,7 +509,6 @@ const setMusicVideo = () => setConfirmedPlayerFlag('musicVideo', PERFORMANCE_CON
 const setLyricBlur = () => setConfirmedPlayerFlag('lyricBlur', PERFORMANCE_CONFIRM_MESSAGE)
 const setCoverBlur = () => setConfirmedPlayerFlag('coverBlur', PERFORMANCE_CONFIRM_MESSAGE)
 const setGaplessPlayback = () => setConfirmedPlayerFlag('gaplessPlayback', GAPLESS_CONFIRM_MESSAGE)
-const setAudioVisualizer = () => setConfirmedPlayerFlag('audioVisualizer', PERFORMANCE_CONFIRM_MESSAGE)
 const buildHifiOutputConfig = () => ({
     mpvPath: playerStore.localHifiMpvPath,
     mode: playerStore.localHifiOutputMode,
@@ -747,17 +744,6 @@ const clearFmRecent = () => {
                                     <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.gaplessPlayback }">{{ playerStore.gaplessPlayback ? '已开启' : '已关闭' }}</div>
                                     <Transition name="toggle">
                                         <div class="toggle-on" v-show="playerStore.gaplessPlayback"></div>
-                                    </Transition>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="option">
-                            <div class="option-name">音频可视化</div>
-                            <div class="option-operation">
-                                <div class="toggle" @click="setAudioVisualizer()">
-                                    <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.audioVisualizer }">{{ playerStore.audioVisualizer ? '已开启' : '已关闭' }}</div>
-                                    <Transition name="toggle">
-                                        <div class="toggle-on" v-show="playerStore.audioVisualizer"></div>
                                     </Transition>
                                 </div>
                             </div>

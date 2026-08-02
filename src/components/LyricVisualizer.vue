@@ -107,9 +107,15 @@ function closeMediaAudioContext() {
     void context.close().catch(() => {})
 }
 
+function getTransitionSmoothing() {
+    const value = Number(lyricVisualizerTransitionDelay.value)
+    if (!Number.isFinite(value)) return 0.75
+    return Math.max(0, Math.min(0.95, value))
+}
+
 function configureAnalyser(node) {
     node.fftSize = FFT_SIZE
-    node.smoothingTimeConstant = 0.82
+    node.smoothingTimeConstant = getTransitionSmoothing()
     node.minDecibels = -92
     node.maxDecibels = -18
     return node
@@ -266,7 +272,6 @@ function sampleSpectrum() {
     const nyquist = sampleRate / 2
     const minFrequency = Math.max(20, Math.min(nyquist, Number(lyricVisualizerFrequencyMin.value) || 20))
     const maxFrequency = Math.max(minFrequency + 1, Math.min(nyquist, Number(lyricVisualizerFrequencyMax.value) || 8000))
-    const smoothing = Math.max(0.05, Math.min(1, 1 - Number(lyricVisualizerTransitionDelay.value || 0)))
     let total = 0
 
     for (let index = 0; index < levels.length; index += 1) {
@@ -279,7 +284,13 @@ function sampleSpectrum() {
         for (let sample = start; sample <= end; sample += 1) sum += analyserData[sample]
         const raw = sum / (end - start + 1) / 255
         const target = Math.max(MIN_LEVEL, Math.pow(raw, 0.72))
-        levels[index] += (target - levels[index]) * smoothing
+        const current = levels[index] || 0
+        if (target >= current) {
+            levels[index] = current + (target - current) * 0.55
+        } else {
+            const drop = 0.1 + current * 0.04
+            levels[index] = current - Math.min(current - target, drop)
+        }
         total += raw
     }
     return total / Math.max(1, levels.length) > 0.002
@@ -435,6 +446,11 @@ watch(
         })
     }
 )
+
+watch(lyricVisualizerTransitionDelay, () => {
+    if (analyser) configureAnalyser(analyser)
+    requestDraw()
+})
 
 onMounted(() => {
     resizeCanvas()

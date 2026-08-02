@@ -3,7 +3,6 @@ import { computed, defineAsyncComponent, onMounted, onUnmounted } from 'vue';
 import Home from './views/Home.vue';
 import Title from './components/Title.vue';
 import SearchInput from './components/SearchInput.vue';
-import AudioVisualizer from './components/AudioVisualizer.vue';
 import WindowControl from './components/WindowControl.vue';
 import MusicWidget from './components/MusicWidget.vue';
 import CustomBackgroundLayer from './components/CustomBackgroundLayer.vue';
@@ -27,9 +26,6 @@ const customBackgroundChromeActive = computed(() => (
     && playerStore.customBackgroundApplyToChrome
     && !!playerStore.customBackgroundImage
 ));
-const visualizerActive = computed(() => {
-    return playerStore.audioVisualizer && playerStore.playerShow && !playerStore.widgetState && !!playerStore.currentMusic;
-});
 const removeCheckUpdateListener = windowApi.checkUpdate((version) => {
     otherStore.toUpdate = true;
     otherStore.newVersion = version;
@@ -65,9 +61,8 @@ const handleTitleBarDoubleClick = () => {
             <Home class="home" v-show="playerStore.widgetState"></Home>
         </Transition>
     </div>
-    <div class="globalWidget" :class="{ 'visualizer-active': visualizerActive }">
+    <div class="globalWidget">
         <Title class="widget-title"></Title>
-        <AudioVisualizer class="widget-visualizer"></AudioVisualizer>
         <div class="widget-search">
             <SearchInput></SearchInput>
         </div>
@@ -149,10 +144,6 @@ const handleTitleBarDoubleClick = () => {
     }
 }
 .globalWidget {
-    --visualizer-width: clamp(260px, 28vw, 340px);
-    --visualizer-gap: 24px;
-    --visualizer-shift: calc(var(--visualizer-width) + var(--visualizer-gap));
-
     display: flex;
     flex-direction: row;
     align-items: center;
@@ -171,18 +162,7 @@ const handleTitleBarDoubleClick = () => {
     }
     .widget-search {
         margin-left: 30px;
-        transform: translate3d(calc(-1 * var(--visualizer-shift)), 0, 0);
-        transition: transform 0.72s cubic-bezier(0.16, 1, 0.3, 1);
-        will-change: transform;
         pointer-events: auto;
-    }
-    .widget-visualizer {
-        flex-shrink: 0;
-    }
-    &.visualizer-active {
-        .widget-search {
-            transform: translate3d(0, 0, 0);
-        }
     }
 }
 .dragBar {

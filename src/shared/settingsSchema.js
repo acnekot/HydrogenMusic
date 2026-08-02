@@ -96,7 +96,7 @@ export function normalizeMusicSettings(music = {}) {
     normalized.level = normalizeMusicLevel(normalized.level)
     normalized.showSongTranslation = normalized.showSongTranslation !== false
     normalized.gaplessPlayback = normalized.gaplessPlayback === true
-    normalized.audioVisualizer = normalized.audioVisualizer === true
+    delete normalized.audioVisualizer
     normalized.lyricFollowPosition = AVAILABLE_LYRIC_FOLLOW_POSITIONS.has(normalized.lyricFollowPosition)
         ? normalized.lyricFollowPosition
         : DEFAULT_SETTINGS.music.lyricFollowPosition

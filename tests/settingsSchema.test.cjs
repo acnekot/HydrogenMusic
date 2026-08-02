@@ -111,3 +111,9 @@ test('normalization does not mutate default settings', () => {
     customized.other.customBackground.image = 'changed.png'
     assert.deepEqual(getDefaultSettings(), defaultsBefore)
 })
+
+test('removed top-level audio visualizer setting is discarded', () => {
+    const settings = normalizeSettings({ music: { audioVisualizer: true } })
+
+    assert.equal(Object.hasOwn(settings.music, 'audioVisualizer'), false)
+})
