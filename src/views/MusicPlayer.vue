@@ -10,6 +10,7 @@ import { readCommentCountCache, writeCommentCountCache } from '../utils/commentC
 import { buildCoverBackdropCandidates } from '../utils/coverBackdrop';
 import { getIndexedSongOrFirst } from '../utils/songList';
 import { useStableImageSource } from '../composables/useStableImageSource';
+import CustomBackgroundLayer from '../components/CustomBackgroundLayer.vue';
 const playerStore = usePlayerStore();
 const Comments = defineAsyncComponent(() => import('../components/Comments.vue'));
 const MusicVideo = defineAsyncComponent(() => import('../components/MusicVideo.vue'));
@@ -61,6 +62,12 @@ const handleCoverBgError = () => {
 };
 
 const showCoverBackdrop = computed(() => !!playerStore.coverBlur && !!displayedCoverBgUrl.value && !playerStore.videoIsPlaying);
+const customBackgroundPlayerActive = computed(() => (
+    playerStore.customBackgroundEnabled
+    && playerStore.customBackgroundApplyToPlayer
+    && !!playerStore.customBackgroundImage
+    && !playerStore.videoIsPlaying
+));
 
 // 当切到本地歌曲时，若右侧是评论区则自动切回歌词，避免无按钮无法关闭
 const currentTrack = computed(() => {
@@ -185,6 +192,13 @@ watch(currentTrack, (song) => {
 
 <template>
     <div class="music-player">
+        <CustomBackgroundLayer
+            :active="customBackgroundPlayerActive"
+            :image="playerStore.customBackgroundImage"
+            :mode="playerStore.customBackgroundMode"
+            :blur="playerStore.customBackgroundBlur"
+            :brightness="playerStore.customBackgroundBrightness"
+        />
         <Transition name="fade3">
             <div
                 v-if="showCoverBackdrop"

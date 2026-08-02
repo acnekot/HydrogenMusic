@@ -1,18 +1,6 @@
 require('./src/electron/logSanitizer')()
 
 const startNeteaseMusicApi = require('./src/electron/services')
-// Avoid depending on src/utils in packaged build; compute inline
-const isCreateMpris = process.platform === 'linux';
-// Load MPRIS integration lazily only on Linux to avoid packaging issues on macOS/Windows
-let createMpris;
-if (isCreateMpris) {
-  try {
-    ({ createMpris } = require('./src/electron/mpris'));
-  } catch (e) {
-    console.warn('MPRIS module not available:', e);
-  }
-}
-
 
 const { app, BrowserWindow, globalShortcut, Menu, ipcMain, session, shell } = require('electron')
 const path = require('path')
@@ -23,7 +11,8 @@ let lyricWindow = null
 let forceQuit = false;
 const MAIN_WINDOW_MIN_WIDTH = 1080
 const MAIN_WINDOW_MIN_HEIGHT = 672
-const isDevServer = () => process.resourcesPath.indexOf(path.join('node_modules')) != -1
+const isSmokeTest = process.env.HYDROGENMUSIC_SMOKE_TEST === '1'
+const isDevServer = () => !isSmokeTest && process.resourcesPath.indexOf(path.join('node_modules')) != -1
 // 标记是否为“设置里手动检查更新”流程，以避免弹出大窗
 let manualUpdateCheckInProgress = false;
 let ncmApiReadyResolved = false;
@@ -97,14 +86,6 @@ if (!gotTheLock) {
         }
     })
 
-  // disable chromium mpris
-  if (isCreateMpris) {
-    app.commandLine.appendSwitch(
-      'disable-features',
-      'HardwareMediaKeyHandling,MediaSessionService'
-    );
-  }
-
   applyEarlyChromiumSwitches()
 
   app.whenReady().then(async () => {
@@ -112,20 +93,24 @@ if (!gotTheLock) {
       console.error('捕获到未处理异常:', err)
     })
     createWindow()
-    startNeteaseMusicApi()
-      .then((result) => {
-        const payload = result && typeof result == 'object'
-          ? { ready: !!result.ready, ...(result.error ? { error: result.error } : {}) }
-          : { ready: true }
-        if (payload.ready) console.log('Netease API 已就绪')
-        else console.warn('Netease API 未就绪:', payload.error || 'unknown error')
-        resolveNcmApiReady(payload)
-      })
-      .catch((err) => {
-        const errorMessage = err && err.message ? err.message : 'unknown error'
-        console.error('Netease API 启动失败:', err);
-        resolveNcmApiReady({ ready: false, error: errorMessage })
-      })
+    if (isSmokeTest) {
+      resolveNcmApiReady({ ready: false, error: 'smoke-test' })
+    } else {
+      startNeteaseMusicApi()
+        .then((result) => {
+          const payload = result && typeof result == 'object'
+            ? { ready: !!result.ready, ...(result.error ? { error: result.error } : {}) }
+            : { ready: true }
+          if (payload.ready) console.log('Netease API 已就绪')
+          else console.warn('Netease API 未就绪:', payload.error || 'unknown error')
+          resolveNcmApiReady(payload)
+        })
+        .catch((err) => {
+          const errorMessage = err && err.message ? err.message : 'unknown error'
+          console.error('Netease API 启动失败:', err);
+          resolveNcmApiReady({ ready: false, error: errorMessage })
+        })
+    }
     app.on('activate', () => {
       // 在macOS上，当点击dock图标并且没有其他窗口打开时，
       // 应该重新创建一个窗口。
@@ -313,6 +298,7 @@ const createWindow = () => {
     const showMainWindow = () => {
         if (!win || win.isDestroyed() || hasShownMainWindow) return
         hasShownMainWindow = true
+        if (isSmokeTest) return
         win.show()
         // 微调 macOS 交通灯位置以匹配自定义布局高度
         try {
@@ -325,6 +311,7 @@ const createWindow = () => {
     const initPostShowFeatures = () => {
         if (postShowInitialized) return
         postShowInitialized = true
+        if (isSmokeTest) return
         if (!isDevServer()) {
             // macOS: 禁用内置自动更新，改为手动检查（GitHub API）
             if (process.platform === 'darwin') {
@@ -396,9 +383,16 @@ const createWindow = () => {
     win.webContents.once('did-finish-load', () => {
         showMainWindow()
         initPostShowFeatures()
+        if (isSmokeTest) {
+            setTimeout(() => {
+                console.log('ELECTRON_SMOKE_READY')
+                app.exit(0)
+            }, 1200)
+        }
     })
     win.webContents.on('render-process-gone', (_event, details) => {
         console.error('主窗口渲染进程异常退出:', details)
+        if (isSmokeTest) app.exit(1)
     })
     win.webContents.on('console-message', (details) => {
         if (details.level === 'warning' || details.level === 'error') {
@@ -468,10 +462,6 @@ const createWindow = () => {
     InitTray(win, app, path.resolve(__dirname, './src/assets/icon/' + (process.platform === 'win32' ? 'icon.ico' : 'icon.png')))
     registerShortcuts(win, app)
 
-  // create mpris
-  if (isCreateMpris && typeof createMpris === 'function') {
-    createMpris(win);
-  }
 }
 
 // 创建桌面歌词窗口

@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer, webUtils } = require('electron')
+const { contextBridge, ipcRenderer, webFrame, webUtils } = require('electron')
 const { pathToFileURL } = require('url')
 const TRUSTED_RESOURCE_ERROR_MARKER = '__hydrogenMusicTrustedResourceError'
 
@@ -247,14 +247,6 @@ function updateDockMenu(songInfo) {
         // ignore
     }
 }
-function sendMetaData(metadata) {
-  ipcRenderer.send('metadata', metadata);
-}
-
-function sendPlayerCurrentTrackTime(t) {
-  ipcRenderer.send("playerCurrentTrackTime", t)
-}
-
 function toFileUrl(filePathOrUrl) {
     if (!filePathOrUrl || typeof filePathOrUrl !== 'string') return ''
     const value = filePathOrUrl.trim()
@@ -274,6 +266,15 @@ function toFileUrl(filePathOrUrl) {
     // encodeURI won't encode '#' and '?', which break URLs (fragment/query), so patch them manually
     const encoded = encodeURI(withLeadingSlash).replace(/#/g, '%23').replace(/\?/g, '%3F')
     return encoded.startsWith('/') ? `file://${encoded}` : `file:///${encoded}`
+}
+
+function setZoom(factor) {
+    const numericFactor = Number(factor)
+    const safeFactor = Number.isFinite(numericFactor)
+        ? Math.min(3, Math.max(0.5, numericFactor))
+        : 1
+    webFrame.setZoomFactor(safeFactor)
+    return safeFactor
 }
 
 
@@ -321,6 +322,8 @@ contextBridge.exposeInMainWorld('windowApi', {
     getSystemFonts: () => ipcRenderer.invoke('system-fonts:list'),
     openDirectory: () => ipcRenderer.invoke('dialog:openFile'),
     openFile: () => ipcRenderer.invoke('dialog:openFile'),
+    openImageFile: () => ipcRenderer.invoke('dialog:openImageFile'),
+    setZoom,
     clearLocalMusicData,
     persistLocalMusicDerived: (payload) => ipcRenderer.send('persist-local-music-derived', payload),
     registerShortcuts,
@@ -398,36 +401,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getLyricWindowContentBounds: () => ipcRenderer.invoke('get-lyric-window-content-bounds'),
     moveLyricWindowContentTo: (x, y, width, height) => ipcRenderer.send('move-lyric-window-content-to', { x, y, width, height }),
 })
-
-contextBridge.exposeInMainWorld('playerApi', {
-  // 切换循环模式
-  switchRepeatMode: (mode) => ipcRenderer.send('switchRepeatMode', mode), // mode: 'off' | 'one' | 'on'
-
-  // 切换随机播放
-  switchShuffle: (shuffle) => ipcRenderer.send('switchShuffle', shuffle), // shuffle: true/false
-  sendMetaData,
-  sendPlayerCurrentTrackTime,
-  onSetPosition: (callback) => {
-    const listener = (_, positionUs) => {
-      callback(positionUs)
-    }
-    return subscribeChannel('setPosition', listener)
-  },
-  onNext: (callback) => subscribeChannel('next', callback),
-  onPrevious: (callback) => subscribeChannel('previous', callback),
-  onPlayM: (callback) => subscribeChannel('play', callback),
-  onPlayPause: (callback) => subscribeChannel('playpause', callback),
-  onPauseM: (callback) => subscribeChannel('pause', callback),
-  onRepeat: (callback) => subscribeChannel('repeat', callback),
-  onShuffle: (callback) => subscribeChannel('shuffle', callback),
-  setVolume: (volume) => ipcRenderer.send('setVolume', volume),
-  onVolumeChanged: (callback) => {
-    const listener = (_, volume) => {
-      callback(volume)
-    }
-    return subscribeChannel('volume_changed', listener)
-  },
-});
 
 // 这里安全地暴露必要的接口
 contextBridge.exposeInMainWorld('process', {

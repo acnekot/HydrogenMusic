@@ -109,6 +109,18 @@ async function showOpenDirectoryDialog() {
     return filePaths[0]
 }
 
+async function showOpenImageDialog() {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [
+            { name: '图片', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'avif'] },
+            { name: '所有文件', extensions: ['*'] },
+        ],
+    })
+    if (canceled) return null
+    return filePaths[0]
+}
+
 module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     moduleState.win = win
     moduleState.app = app
@@ -968,6 +980,14 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     }
     ipcMain.handle('dialog:openDirectory', handleOpenDirectoryDialog)
     ipcMain.handle('dialog:openFile', handleOpenDirectoryDialog)
+    ipcMain.handle('dialog:openImageFile', async () => {
+        try {
+            return await showOpenImageDialog()
+        } catch (error) {
+            console.error('打开图片选择器失败:', error)
+            return null
+        }
+    })
     ipcMain.on('register-shortcuts', () => {
         registerShortcuts(win, app)
     })

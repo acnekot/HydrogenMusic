@@ -111,6 +111,30 @@ export const usePlayerStore = defineStore('playerStore', {
             lyricShow: false, //歌词是否显示
             lyricEle: null,//歌词DOM
             isLyricDelay: true, //调整进度的时候禁止赋予delay属性
+            lyricFollowPosition: 'center', // 歌词激活行位置：top/center/bottom
+            lyricVisualizer: false,
+            lyricVisualizerHeight: 220,
+            lyricVisualizerFrequencyMin: 20,
+            lyricVisualizerFrequencyMax: 8000,
+            lyricVisualizerTransitionDelay: 0.75,
+            lyricVisualizerBarCount: 48,
+            lyricVisualizerBarWidth: 55,
+            lyricVisualizerColor: 'black',
+            lyricVisualizerOpacity: 100,
+            lyricVisualizerStyle: 'bars',
+            lyricVisualizerRadialSize: 100,
+            lyricVisualizerRadialOffsetX: 0,
+            lyricVisualizerRadialOffsetY: 0,
+            lyricVisualizerRadialCoreSize: 62,
+            customBackgroundEnabled: false,
+            customBackgroundImage: '',
+            customBackgroundMode: 'cover',
+            customBackgroundBlur: 0,
+            customBackgroundBrightness: 100,
+            customBackgroundApplyToChrome: true,
+            customBackgroundApplyToPlayer: true,
+            globalZoom: 1,
+            commentFontSize: 13,
             localBase64Img: null, //如果是本地歌曲，获取封面
             forbidLastRouter: false, //在主动跳转router时禁用回到上次离开的路由的地址功能
             musicVideo: false,

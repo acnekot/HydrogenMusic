@@ -22,6 +22,22 @@
       "showSongTranslation": true,
       "gaplessPlayback": false,
       "audioVisualizer": false,
+      "lyricFollowPosition": "center",
+      "lyricVisualizer": false,
+      "lyricVisualizerHeight": 220,
+      "lyricVisualizerFrequencyMin": 20,
+      "lyricVisualizerFrequencyMax": 8000,
+      "lyricVisualizerTransitionDelay": 0.75,
+      "lyricVisualizerBarCount": 48,
+      "lyricVisualizerBarWidth": 55,
+      "lyricVisualizerColor": "black",
+      "lyricVisualizerOpacity": 100,
+      "lyricVisualizerStyle": "bars",
+      "lyricVisualizerRadialSize": 100,
+      "lyricVisualizerRadialOffsetX": 0,
+      "lyricVisualizerRadialOffsetY": 0,
+      "lyricVisualizerRadialCoreSize": 62,
+      "commentFontSize": 13,
       "localHifiOutput": false,
       "localHifiOutputMode": "shared",
       "localHifiMpvPath": "",
@@ -81,8 +97,18 @@
     "other": {
       "globalShortcuts": true,
       "quitApp": "minimize",
+      "globalZoom": 1,
       "customFont": "",
-      "customFontLabel": ""
+      "customFontLabel": "",
+      "customBackground": {
+        "enabled": false,
+        "image": "",
+        "mode": "cover",
+        "blur": 0,
+        "brightness": 100,
+        "applyToChrome": true,
+        "applyToPlayer": true
+      }
     }
   }
 }

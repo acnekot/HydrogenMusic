@@ -111,7 +111,6 @@ watch(volume, (v) => {
     volume.value = normalizedVolume
     return
   }
-  window.playerApi?.setVolume?.(normalizedVolume)
   if (gaplessPreload?.howl && !isCurrentHowl(gaplessPreload.howl)) {
     gaplessPreload.howl.volume?.(normalizedVolume)
   }
@@ -932,23 +931,6 @@ function normalizePlayMode(mode, inFM = isPersonalFMContext()) {
 function syncPlayModeExternalState(mode) {
     windowApi.changeTrayMusicPlaymode(mode)
     syncWindowsTaskbarPlaybackState()
-
-    // 通知 MPRIS 循环模式
-    switch (mode) {
-        case 0: // 顺序播放
-        case 3: // 随机播放
-            window.playerApi.switchRepeatMode('off')
-            break
-        case 1: // 列表循环
-            window.playerApi.switchRepeatMode('on')
-            break
-        case 2: // 单曲循环
-            window.playerApi.switchRepeatMode('one')
-            break
-    }
-
-    // 通知 MPRIS 随机状态
-    window.playerApi.switchShuffle(mode === 3)
 }
 
 function applyPlayMode(mode, options = {}) {
@@ -1545,7 +1527,6 @@ function activatePlaybackHowl(nextHowl, { autoplay, resumeSeek = null, instantSt
         endEvent: (nextHowl?.__hmWebAudioPlayer || nextHowl?.__hmHifiOutputPlayer) ? 'end' : '',
     })
     currentMusic.value = nextHowl
-    window.playerApi?.setVolume?.(volume.value)
     checkAndLoadVideoForCurrentSong()
 
     if (nextHowl.state?.() === 'loaded') {

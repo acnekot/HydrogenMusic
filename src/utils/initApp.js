@@ -16,7 +16,45 @@ import settingsSchema from '../shared/settingsSchema.js'
 const { normalizeSettings } = settingsSchema
 
 const playerStore = usePlayerStore()
-const { quality, lyricSize, tlyricSize, rlyricSize, lyricInterludeTime, searchAssistLimit, showSongTranslation, gaplessPlayback, audioVisualizer, localHifiOutput, localHifiOutputMode, localHifiMpvPath, localHifiAudioDevice } = storeToRefs(playerStore)
+const {
+    quality,
+    lyricSize,
+    tlyricSize,
+    rlyricSize,
+    lyricInterludeTime,
+    searchAssistLimit,
+    showSongTranslation,
+    gaplessPlayback,
+    audioVisualizer,
+    localHifiOutput,
+    localHifiOutputMode,
+    localHifiMpvPath,
+    localHifiAudioDevice,
+    lyricFollowPosition,
+    lyricVisualizer,
+    lyricVisualizerHeight,
+    lyricVisualizerFrequencyMin,
+    lyricVisualizerFrequencyMax,
+    lyricVisualizerTransitionDelay,
+    lyricVisualizerBarCount,
+    lyricVisualizerBarWidth,
+    lyricVisualizerColor,
+    lyricVisualizerOpacity,
+    lyricVisualizerStyle,
+    lyricVisualizerRadialSize,
+    lyricVisualizerRadialOffsetX,
+    lyricVisualizerRadialOffsetY,
+    lyricVisualizerRadialCoreSize,
+    customBackgroundEnabled,
+    customBackgroundImage,
+    customBackgroundMode,
+    customBackgroundBlur,
+    customBackgroundBrightness,
+    customBackgroundApplyToChrome,
+    customBackgroundApplyToPlayer,
+    globalZoom,
+    commentFontSize,
+} = storeToRefs(playerStore)
 const localStore = useLocalStore()
 const userStore = useUserStore()
 
@@ -29,6 +67,90 @@ let lastSongRestoreScheduled = false
 let localMusicModulePromise = null
 let downloadManagerModulePromise = null
 let customFontResolveToken = 0
+const APPEARANCE_SETTINGS_MIGRATION_KEY = 'hm.appearanceSettingsMigratedV1'
+const LEGACY_MUSIC_SETTING_KEYS = [
+    'lyricFollowPosition',
+    'lyricVisualizer',
+    'lyricVisualizerHeight',
+    'lyricVisualizerFrequencyMin',
+    'lyricVisualizerFrequencyMax',
+    'lyricVisualizerTransitionDelay',
+    'lyricVisualizerBarCount',
+    'lyricVisualizerBarWidth',
+    'lyricVisualizerColor',
+    'lyricVisualizerOpacity',
+    'lyricVisualizerStyle',
+    'lyricVisualizerRadialSize',
+    'lyricVisualizerRadialOffsetX',
+    'lyricVisualizerRadialOffsetY',
+    'lyricVisualizerRadialCoreSize',
+    'commentFontSize',
+]
+
+function migrateLegacyAppearanceSettings(settings) {
+    if (typeof localStorage === 'undefined') return { settings, migrated: false }
+
+    try {
+        if (localStorage.getItem(APPEARANCE_SETTINGS_MIGRATION_KEY) === '1') {
+            return { settings, migrated: false }
+        }
+
+        const rawPlayerStore = localStorage.getItem('playerStore')
+        const legacy = rawPlayerStore ? JSON.parse(rawPlayerStore) : null
+        if (!legacy || typeof legacy !== 'object') {
+            localStorage.setItem(APPEARANCE_SETTINGS_MIGRATION_KEY, '1')
+            return { settings, migrated: false }
+        }
+
+        const nextMusic = { ...(settings?.music || {}) }
+        let migrated = false
+        for (const key of LEGACY_MUSIC_SETTING_KEYS) {
+            if (!Object.prototype.hasOwnProperty.call(legacy, key)) continue
+            nextMusic[key] = legacy[key]
+            migrated = true
+        }
+
+        const nextOther = { ...(settings?.other || {}) }
+        if (Object.prototype.hasOwnProperty.call(legacy, 'globalZoom')) {
+            nextOther.globalZoom = legacy.globalZoom
+            migrated = true
+        }
+
+        const legacyBackground = legacy.customBackground && typeof legacy.customBackground === 'object'
+            ? legacy.customBackground
+            : null
+        const backgroundKeyMap = {
+            customBackgroundEnabled: 'enabled',
+            customBackgroundImage: 'image',
+            customBackgroundMode: 'mode',
+            customBackgroundBlur: 'blur',
+            customBackgroundBrightness: 'brightness',
+            customBackgroundApplyToChrome: 'applyToChrome',
+            customBackgroundApplyToPlayer: 'applyToPlayer',
+        }
+        const nextBackground = {
+            ...(nextOther.customBackground || {}),
+            ...(legacyBackground || {}),
+        }
+        if (legacyBackground) migrated = true
+        for (const [legacyKey, settingKey] of Object.entries(backgroundKeyMap)) {
+            if (!Object.prototype.hasOwnProperty.call(legacy, legacyKey)) continue
+            nextBackground[settingKey] = legacy[legacyKey]
+            migrated = true
+        }
+        if (migrated) nextOther.customBackground = nextBackground
+
+        localStorage.setItem(APPEARANCE_SETTINGS_MIGRATION_KEY, '1')
+        return {
+            settings: migrated
+                ? normalizeSettings({ ...settings, music: nextMusic, other: nextOther })
+                : settings,
+            migrated,
+        }
+    } catch (_) {
+        return { settings, migrated: false }
+    }
+}
 
 function loadLocalMusicModule() {
     if (!localMusicModulePromise) localMusicModulePromise = import('./locaMusic')
@@ -99,7 +221,8 @@ function applyLocalSettings(settings, { hydrateLocalMusic = false } = {}) {
 export function applySettingsSnapshot(settings, options = {}) {
     if (!settings) return null
 
-    const normalizedSettings = setCachedSettingsSnapshot(normalizeSettings(settings))
+    const migration = migrateLegacyAppearanceSettings(normalizeSettings(settings))
+    const normalizedSettings = setCachedSettingsSnapshot(migration.settings)
     quality.value = getPreferredQuality(normalizedSettings?.music?.level)
     lyricSize.value = normalizedSettings?.music?.lyricSize
     tlyricSize.value = normalizedSettings?.music?.tlyricSize
@@ -113,6 +236,39 @@ export function applySettingsSnapshot(settings, options = {}) {
     localHifiOutputMode.value = resolveInitialHifiOutputMode(normalizedSettings?.music?.localHifiOutputMode)
     localHifiMpvPath.value = normalizedSettings?.music?.localHifiMpvPath || ''
     localHifiAudioDevice.value = normalizedSettings?.music?.localHifiAudioDevice || 'auto'
+    lyricFollowPosition.value = normalizedSettings?.music?.lyricFollowPosition
+    lyricVisualizer.value = normalizedSettings?.music?.lyricVisualizer === true
+    lyricVisualizerHeight.value = normalizedSettings?.music?.lyricVisualizerHeight
+    lyricVisualizerFrequencyMin.value = normalizedSettings?.music?.lyricVisualizerFrequencyMin
+    lyricVisualizerFrequencyMax.value = normalizedSettings?.music?.lyricVisualizerFrequencyMax
+    lyricVisualizerTransitionDelay.value = normalizedSettings?.music?.lyricVisualizerTransitionDelay
+    lyricVisualizerBarCount.value = normalizedSettings?.music?.lyricVisualizerBarCount
+    lyricVisualizerBarWidth.value = normalizedSettings?.music?.lyricVisualizerBarWidth
+    lyricVisualizerColor.value = normalizedSettings?.music?.lyricVisualizerColor
+    lyricVisualizerOpacity.value = normalizedSettings?.music?.lyricVisualizerOpacity
+    lyricVisualizerStyle.value = normalizedSettings?.music?.lyricVisualizerStyle
+    lyricVisualizerRadialSize.value = normalizedSettings?.music?.lyricVisualizerRadialSize
+    lyricVisualizerRadialOffsetX.value = normalizedSettings?.music?.lyricVisualizerRadialOffsetX
+    lyricVisualizerRadialOffsetY.value = normalizedSettings?.music?.lyricVisualizerRadialOffsetY
+    lyricVisualizerRadialCoreSize.value = normalizedSettings?.music?.lyricVisualizerRadialCoreSize
+    commentFontSize.value = normalizedSettings?.music?.commentFontSize
+    const customBackground = normalizedSettings?.other?.customBackground || {}
+    customBackgroundEnabled.value = customBackground.enabled === true
+    customBackgroundImage.value = customBackground.image || ''
+    customBackgroundMode.value = customBackground.mode || 'cover'
+    customBackgroundBlur.value = customBackground.blur ?? 0
+    customBackgroundBrightness.value = customBackground.brightness ?? 100
+    customBackgroundApplyToChrome.value = customBackground.applyToChrome !== false
+    customBackgroundApplyToPlayer.value = customBackground.applyToPlayer !== false
+    globalZoom.value = normalizedSettings?.other?.globalZoom ?? 1
+    try {
+        windowApi?.setZoom?.(globalZoom.value)
+    } catch (_) {}
+    if (migration.migrated) {
+        try {
+            windowApi?.setSettings?.(JSON.stringify(normalizedSettings))
+        } catch (_) {}
+    }
     applyCustomFontSetting(normalizedSettings)
 
     applyLocalSettings(normalizedSettings, options)

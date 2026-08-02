@@ -14,6 +14,7 @@ import {
     normalizeLyricLineOffset,
 } from '../utils/lyricLineOffset';
 import { getIndexedSong } from '../utils/songList';
+import LyricVisualizer from './LyricVisualizer.vue';
 
 const playerStore = usePlayerStore();
 const {
@@ -34,6 +35,7 @@ const {
     playerChangeSong,
     lyricInterludeTime,
     lyricBlur,
+    lyricFollowPosition,
     time: totalTime,
     videoIsPlaying,
 } = storeToRefs(playerStore);
@@ -73,6 +75,11 @@ const LYRIC_AUTO_SCROLL_EASING = 'cubic-bezier(0.4, 0, 0.12, 1)';
 const LYRIC_FOLLOW_TOP_OFFSET_PX = 260;
 const LYRIC_FOLLOW_BOTTOM_GUTTER_PX = 180;
 const LYRIC_FOLLOW_VISIBLE_GUTTER_PX = 24;
+const LYRIC_FOLLOW_POSITION_RATIOS = Object.freeze({
+    top: 0.18,
+    center: 0.5,
+    bottom: 0.78,
+});
 const DEFAULT_INTERLUDE_THRESHOLD_SEC = 13;
 const INTERLUDE_EXIT_ANIMATION_MS = 800;
 const INTERLUDE_EXIT_DOM_CLEANUP_MS = 900;
@@ -408,8 +415,11 @@ function getLyricFollowTopOffset(scrollEl, wrapperHeight = 0) {
     if (!scrollEl) return LYRIC_FOLLOW_TOP_OFFSET_PX;
 
     const safeWrapperHeight = Math.max(0, wrapperHeight);
+    const availableHeight = Math.max(0, scrollEl.clientHeight - safeWrapperHeight);
     const maxVisibleTop = Math.max(0, scrollEl.clientHeight - safeWrapperHeight - LYRIC_FOLLOW_VISIBLE_GUTTER_PX);
-    return Math.min(LYRIC_FOLLOW_TOP_OFFSET_PX, maxVisibleTop);
+    const ratio = LYRIC_FOLLOW_POSITION_RATIOS[lyricFollowPosition.value]
+        ?? LYRIC_FOLLOW_POSITION_RATIOS.center;
+    return Math.min(Math.round(availableHeight * ratio), maxVisibleTop);
 }
 
 function updateLyricScrollSpacers(wrapperHeight = 0) {
@@ -1129,6 +1139,12 @@ watch(
     { flush: 'post' }
 );
 
+watch(
+    lyricFollowPosition,
+    () => recalcLyricLayout({ syncBehavior: 'smooth' }),
+    { flush: 'post' }
+);
+
 // 增强版的当前歌词索引监听（统一复用 syncLyricPosition，避免重复逻辑导致状态不一致）
 const { currentLyricIndex } = storeToRefs(playerStore);
 watch(
@@ -1240,6 +1256,7 @@ watch([playing, lyricShow], ([p, show]) => {
 
 <template>
     <div class="lyric-container" :class="{ 'blur-enabled': lyricBlur }">
+        <LyricVisualizer />
         <Transition name="fade">
             <div
                 v-show="showLyricArea"
@@ -1612,6 +1629,8 @@ watch([playing, lyricShow], ([p, show]) => {
         }
     }
     .lyric-area {
+        position: relative;
+        z-index: 1;
         width: calc(100% - 3vh);
         height: calc(100% - 3vh);
         box-sizing: border-box;

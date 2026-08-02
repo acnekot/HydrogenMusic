@@ -10,6 +10,7 @@ import { usePlayerStore } from '@/store/playerStore'
 import Selector from '../components/Selector.vue'
 import FontSelector from '../components/FontSelector.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
+import AppearanceSettings from '../components/settings/AppearanceSettings.vue'
 import { setTheme, getSavedTheme } from '@/utils/theme'
 import { confirmAccountLogout } from '@/utils/accountSession'
 import { getSettingsSnapshot, setCachedSettingsSnapshot } from '@/utils/settingsSnapshot'
@@ -150,6 +151,22 @@ const applySettingsToForm = settings => {
     playerStore.localHifiOutputMode = resolveInitialHifiOutputMode(normalizedSettings.music.localHifiOutputMode)
     playerStore.localHifiMpvPath = normalizedSettings.music.localHifiMpvPath
     playerStore.localHifiAudioDevice = normalizedSettings.music.localHifiAudioDevice
+    playerStore.lyricFollowPosition = normalizedSettings.music.lyricFollowPosition
+    playerStore.lyricVisualizer = normalizedSettings.music.lyricVisualizer === true
+    playerStore.lyricVisualizerHeight = normalizedSettings.music.lyricVisualizerHeight
+    playerStore.lyricVisualizerFrequencyMin = normalizedSettings.music.lyricVisualizerFrequencyMin
+    playerStore.lyricVisualizerFrequencyMax = normalizedSettings.music.lyricVisualizerFrequencyMax
+    playerStore.lyricVisualizerTransitionDelay = normalizedSettings.music.lyricVisualizerTransitionDelay
+    playerStore.lyricVisualizerBarCount = normalizedSettings.music.lyricVisualizerBarCount
+    playerStore.lyricVisualizerBarWidth = normalizedSettings.music.lyricVisualizerBarWidth
+    playerStore.lyricVisualizerColor = normalizedSettings.music.lyricVisualizerColor
+    playerStore.lyricVisualizerOpacity = normalizedSettings.music.lyricVisualizerOpacity
+    playerStore.lyricVisualizerStyle = normalizedSettings.music.lyricVisualizerStyle
+    playerStore.lyricVisualizerRadialSize = normalizedSettings.music.lyricVisualizerRadialSize
+    playerStore.lyricVisualizerRadialOffsetX = normalizedSettings.music.lyricVisualizerRadialOffsetX
+    playerStore.lyricVisualizerRadialOffsetY = normalizedSettings.music.lyricVisualizerRadialOffsetY
+    playerStore.lyricVisualizerRadialCoreSize = normalizedSettings.music.lyricVisualizerRadialCoreSize
+    playerStore.commentFontSize = normalizedSettings.music.commentFontSize
     videoFolder.value = normalizedSettings.local.videoFolder
     downloadFolder.value = normalizedSettings.local.downloadFolder
     downloadCreateSongFolder.value = !!normalizedSettings.local.downloadCreateSongFolder
@@ -160,6 +177,15 @@ const applySettingsToForm = settings => {
     quitApp.value = normalizedSettings.other.quitApp
     customFont.value = normalizedSettings.other.customFont
     customFontLabel.value = normalizedSettings.other.customFontLabel
+    playerStore.globalZoom = normalizedSettings.other.globalZoom
+    const customBackground = normalizedSettings.other.customBackground
+    playerStore.customBackgroundEnabled = customBackground.enabled === true
+    playerStore.customBackgroundImage = customBackground.image
+    playerStore.customBackgroundMode = customBackground.mode
+    playerStore.customBackgroundBlur = customBackground.blur
+    playerStore.customBackgroundBrightness = customBackground.brightness
+    playerStore.customBackgroundApplyToChrome = customBackground.applyToChrome !== false
+    playerStore.customBackgroundApplyToPlayer = customBackground.applyToPlayer !== false
 }
 
 onActivated(() => {
@@ -250,6 +276,22 @@ const setAppSettings = () => {
             localHifiOutputMode: playerStore.localHifiOutputMode,
             localHifiMpvPath: playerStore.localHifiMpvPath,
             localHifiAudioDevice: playerStore.localHifiAudioDevice,
+            lyricFollowPosition: playerStore.lyricFollowPosition,
+            lyricVisualizer: playerStore.lyricVisualizer,
+            lyricVisualizerHeight: playerStore.lyricVisualizerHeight,
+            lyricVisualizerFrequencyMin: playerStore.lyricVisualizerFrequencyMin,
+            lyricVisualizerFrequencyMax: playerStore.lyricVisualizerFrequencyMax,
+            lyricVisualizerTransitionDelay: playerStore.lyricVisualizerTransitionDelay,
+            lyricVisualizerBarCount: playerStore.lyricVisualizerBarCount,
+            lyricVisualizerBarWidth: playerStore.lyricVisualizerBarWidth,
+            lyricVisualizerColor: playerStore.lyricVisualizerColor,
+            lyricVisualizerOpacity: playerStore.lyricVisualizerOpacity,
+            lyricVisualizerStyle: playerStore.lyricVisualizerStyle,
+            lyricVisualizerRadialSize: playerStore.lyricVisualizerRadialSize,
+            lyricVisualizerRadialOffsetX: playerStore.lyricVisualizerRadialOffsetX,
+            lyricVisualizerRadialOffsetY: playerStore.lyricVisualizerRadialOffsetY,
+            lyricVisualizerRadialCoreSize: playerStore.lyricVisualizerRadialCoreSize,
+            commentFontSize: playerStore.commentFontSize,
         },
         local: {
             videoFolder: videoFolder.value,
@@ -264,6 +306,16 @@ const setAppSettings = () => {
             quitApp: quitApp.value,
             customFont: customFont.value,
             customFontLabel: customFont.value ? customFontLabel.value : '',
+            globalZoom: playerStore.globalZoom,
+            customBackground: {
+                enabled: playerStore.customBackgroundEnabled,
+                image: playerStore.customBackgroundImage,
+                mode: playerStore.customBackgroundMode,
+                blur: playerStore.customBackgroundBlur,
+                brightness: playerStore.customBackgroundBrightness,
+                applyToChrome: playerStore.customBackgroundApplyToChrome,
+                applyToPlayer: playerStore.customBackgroundApplyToPlayer,
+            },
         },
     }
 
@@ -758,6 +810,7 @@ const clearFmRecent = () => {
                         </div>
                     </div>
                 </div>
+                <AppearanceSettings />
                 <div class="settings-item">
                     <h2 class="item-title">本地</h2>
                     <div class="line"></div>

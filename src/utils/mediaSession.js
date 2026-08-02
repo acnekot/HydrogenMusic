@@ -97,7 +97,6 @@ export function initMediaSession() {
         mediaSession.playbackState = 'none'
       }
     } catch (_) {}
-    try { window.playerApi?.sendMetaData?.(null) } catch (_) {}
     updatePosition({ forceZero: true })
     lastMetadataDuration = 0
   }
@@ -114,7 +113,6 @@ export function initMediaSession() {
         duration = Number(override && typeof override.duration === 'number' ? override.duration : 0)
         position = 0
       }
-      window.playerApi?.sendPlayerCurrentTrackTime?.(position)
       lastDur = duration
       lastPos = position
       lastTs = Date.now()
@@ -173,8 +171,6 @@ export function initMediaSession() {
       if (mediaSession && typeof window.MediaMetadata === 'function') {
         mediaSession.metadata = new window.MediaMetadata({ title, artist, album, artwork: metadata.artwork })
       }
-      // 发送给 mpris（Linux）桥接
-      try { window.playerApi?.sendMetaData?.(metadata) } catch (_) {}
     } catch (_) {}
     lastMetadataDuration = duration
     updatePlaybackState()

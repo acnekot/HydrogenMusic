@@ -261,7 +261,7 @@ npm run dist -- --linux
 - 音频播放：Howler、Web Audio API
 - 视频播放：Plyr
 - 本地元数据：music-metadata、node-id3、metaflac-js、ffmpeg-static
-- 桌面集成：electron-store、electron-updater、electron-win-state、mpris-service
+- 桌面集成：electron-store、electron-updater、electron-win-state、Chromium Media Session / MPRIS
 
 ## 项目结构
 

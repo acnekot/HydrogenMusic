@@ -1,8 +1,14 @@
 <script setup>
+import { computed } from 'vue'
 import CommentText from './CommentText.vue'
 import { useCommentsPanel } from '../composables/useCommentsPanel'
+import { usePlayerStore } from '../store/playerStore'
 
 const emit = defineEmits(['total-change'])
+const playerStore = usePlayerStore()
+const commentStyle = computed(() => ({
+    '--comment-font-size': `${Math.max(8, Math.min(32, Number(playerStore.commentFontSize) || 13))}px`,
+}))
 
 const {
     userStore,
@@ -35,7 +41,7 @@ const {
 </script>
 
 <template>
-    <div class="arknights-comments" ref="commentsContainerRef" @scroll.passive="handleCommentsScroll">
+    <div class="arknights-comments" ref="commentsContainerRef" :style="commentStyle" @scroll.passive="handleCommentsScroll">
         <!-- 评论区主标题 -->
         <div class="comments-header">
             <div class="header-frame">
@@ -851,7 +857,7 @@ const {
 // 评论内容 - 更新为适配CommentText组件
 .comment-text {
     font-family: SourceHanSansCN-Bold;
-    font-size: 13px;
+    font-size: var(--comment-font-size, 13px);
     color: rgba(0, 0, 0, 0.85);
     line-height: 1.45;
     margin-bottom: 9px;

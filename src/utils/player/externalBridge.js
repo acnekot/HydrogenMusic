@@ -46,17 +46,6 @@ export function initPlayerExternalBridge(handlers = {}) {
         pushDisposable(windowApi.beforeQuit(() => handlers.onBeforeQuit?.()))
     }
 
-    if (typeof window !== 'undefined' && window.playerApi) {
-        pushDisposable(window.playerApi.onSetPosition(positionSeconds => handlers.onSetPosition?.(positionSeconds)))
-        pushDisposable(window.playerApi.onPlayPause(() => handlers.onPlayerPlayPause?.()))
-        pushDisposable(window.playerApi.onNext(() => handlers.onPlayerNext?.()))
-        pushDisposable(window.playerApi.onPrevious(() => handlers.onPlayerPrevious?.()))
-        pushDisposable(window.playerApi.onPlayM(() => handlers.onPlayerPlay?.()))
-        pushDisposable(window.playerApi.onPauseM(() => handlers.onPlayerPause?.()))
-        pushDisposable(window.playerApi.onRepeat((event, loopStatus) => handlers.onPlayerRepeat?.(loopStatus, event)))
-        pushDisposable(window.playerApi.onShuffle((event, shuffle) => handlers.onPlayerShuffle?.(shuffle, event)))
-        pushDisposable(window.playerApi.onVolumeChanged(volume => handlers.onPlayerVolumeChanged?.(volume)))
-    }
 }
 
 export function destroyPlayerExternalBridge() {

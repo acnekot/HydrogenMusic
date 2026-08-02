@@ -121,10 +121,6 @@ const BASE_FILE_PATTERNS = [
 ];
 
 const LINUX_ONLY_DEPENDENCY_EXCLUDES = [
-  '!**/node_modules/dbus-next',
-  '!**/node_modules/dbus-next/**/*',
-  '!**/node_modules/mpris-service',
-  '!**/node_modules/mpris-service/**/*',
   '!**/node_modules/abstract-socket',
   '!**/node_modules/abstract-socket/**/*',
   '!**/node_modules/bindings',

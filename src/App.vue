@@ -6,6 +6,7 @@ import SearchInput from './components/SearchInput.vue';
 import AudioVisualizer from './components/AudioVisualizer.vue';
 import WindowControl from './components/WindowControl.vue';
 import MusicWidget from './components/MusicWidget.vue';
+import CustomBackgroundLayer from './components/CustomBackgroundLayer.vue';
 import { destroyDesktopLyric, initDesktopLyric } from './utils/desktopLyric';
 import { destroyLyricRuntime, initLyricRuntime } from './composables/usePlayerRuntime';
 
@@ -21,6 +22,11 @@ const Update = defineAsyncComponent(() => import('./components/Update.vue'));
 
 const playerStore = usePlayerStore();
 const otherStore = useOtherStore();
+const customBackgroundChromeActive = computed(() => (
+    playerStore.customBackgroundEnabled
+    && playerStore.customBackgroundApplyToChrome
+    && !!playerStore.customBackgroundImage
+));
 const visualizerActive = computed(() => {
     return playerStore.audioVisualizer && playerStore.playerShow && !playerStore.widgetState && !!playerStore.currentMusic;
 });
@@ -48,6 +54,13 @@ const handleTitleBarDoubleClick = () => {
 
 <template>
     <div class="mainWindow">
+        <CustomBackgroundLayer
+            :active="customBackgroundChromeActive"
+            :image="playerStore.customBackgroundImage"
+            :mode="playerStore.customBackgroundMode"
+            :blur="playerStore.customBackgroundBlur"
+            :brightness="playerStore.customBackgroundBrightness"
+        />
         <Transition name="home">
             <Home class="home" v-show="playerStore.widgetState"></Home>
         </Transition>
@@ -115,6 +128,8 @@ const handleTitleBarDoubleClick = () => {
     background: linear-gradient(rgba(176, 209, 217, 0.9) -20%, rgba(176, 209, 217, 0.4) 50%, rgba(176, 209, 217, 0.9) 120%);
     opacity: 0;
     animation: mainWindows-starting 0.8s cubic-bezier(0.14, 0.91, 0.58, 1) forwards;
+    position: relative;
+    overflow: hidden;
     @keyframes mainWindows-starting {
         0% {
             background-color: rgba(222, 235, 239, 1);
@@ -129,6 +144,8 @@ const handleTitleBarDoubleClick = () => {
     }
     .home {
         height: calc(100% - 78px);
+        position: relative;
+        z-index: 1;
     }
 }
 .globalWidget {
