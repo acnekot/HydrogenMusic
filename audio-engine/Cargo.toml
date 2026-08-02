@@ -2,7 +2,7 @@
 name = "hydrogen-audio-engine"
 version = "0.1.0"
 edition = "2021"
-description = "Hydrogen Music DJ Audio Engine - VST3 host, EQ, deck mixing"
+description = "Experimental Hydrogen Music DJ audio engine with EQ and dual-deck mixing"
 
 [[bin]]
 name = "hydrogen-audio-engine"
@@ -15,24 +15,12 @@ cpal = "0.15"
 # Audio decoding (FLAC, MP3, WAV, OGG)
 symphonia = { version = "0.5", features = ["all"] }
 
-# Resampling for BPM sync
-rubato = "0.15"
-
-# VST3 plugin hosting
-vst3 = "0.3"
-
 # IIR filters for EQ
 biquad = "0.4"
 
 # JSON serialization for RPC
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# Ringbuffer for audio thread
-ringbuf = "0.3"
-
-# Cross-platform thread utilities
-crossbeam-channel = "0.5"
 
 [profile.release]
 opt-level = 3

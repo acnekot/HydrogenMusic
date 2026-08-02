@@ -76,7 +76,7 @@ const deckData = computed(() => djStore.decks[props.deck])
 
 function formatTime(positionSamples, durationSamples) {
     if (!durationSamples) return '0:00 / 0:00'
-    const sr = 44100
+    const sr = djStore.sampleRate
     const posSec = positionSamples / sr
     const durSec = durationSamples / sr
     const fmt = (sec) => {

@@ -703,8 +703,8 @@ module.exports = IpcMainEvent = (win, app, lyricFunctions = {}) => {
     // ===== DJ Audio Engine =====
     ipcMain.handle('dj:start', async () => {
         try {
-            await audioEngine.startEngine(app)
-            return { ok: true }
+            const engine = await audioEngine.startEngine(app)
+            return { ok: true, engine }
         } catch (e) {
             return { ok: false, error: e.message }
         }

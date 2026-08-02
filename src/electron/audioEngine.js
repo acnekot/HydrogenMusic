@@ -7,6 +7,18 @@ let pendingCalls = new Map()
 let callId = 0
 let eventListeners = []
 let lineReader = null
+let startPromise = null
+let engineInfo = null
+
+function emitEvent(event) {
+    for (const listener of eventListeners) {
+        try {
+            listener(event)
+        } catch (error) {
+            console.error('[AudioEngine] Event listener error:', error)
+        }
+    }
+}
 
 /**
  * 获取音频引擎可执行文件路径
@@ -31,12 +43,10 @@ function getEnginePath(app) {
  * @returns {Promise<void>} 引擎就绪后 resolve
  */
 function startEngine(app) {
-    return new Promise((resolve, reject) => {
-        if (engineProc) {
-            resolve()
-            return
-        }
+    if (engineInfo && engineProc) return Promise.resolve(engineInfo)
+    if (startPromise) return startPromise
 
+    startPromise = new Promise((resolve, reject) => {
         const enginePath = getEnginePath(app)
         console.log('[AudioEngine] Starting:', enginePath)
 
@@ -49,14 +59,23 @@ function startEngine(app) {
             reject(new Error(`Failed to spawn audio engine: ${err.message}`))
             return
         }
+        const proc = engineProc
 
         // 解析 stdout（newline-delimited JSON）
         lineReader = readline.createInterface({
-            input: engineProc.stdout,
+            input: proc.stdout,
             crlfDelay: Infinity,
         })
 
-        let readyResolved = false
+        let startupSettled = false
+        let startupTimeout = null
+
+        const settleStartup = (callback, value) => {
+            if (startupSettled) return
+            startupSettled = true
+            if (startupTimeout) clearTimeout(startupTimeout)
+            callback(value)
+        }
 
         lineReader.on('line', (line) => {
             if (!line.trim()) return
@@ -70,10 +89,22 @@ function startEngine(app) {
             }
 
             // Ready 事件
-            if (msg.event === 'ready' && !readyResolved) {
-                readyResolved = true
+            if (msg.event === 'ready') {
+                engineInfo = {
+                    version: msg.version,
+                    sampleRate: msg.sampleRate,
+                    channels: msg.channels,
+                    sampleFormat: msg.sampleFormat,
+                    outputDevice: msg.outputDevice,
+                    capabilities: msg.capabilities || { vst3Hosting: false },
+                }
                 console.log('[AudioEngine] Ready, version:', msg.version)
-                resolve()
+                settleStartup(resolve, engineInfo)
+                return
+            }
+
+            if (msg.event === 'fatal') {
+                settleStartup(reject, new Error(msg.message || 'Audio engine failed to initialize'))
                 return
             }
 
@@ -93,45 +124,40 @@ function startEngine(app) {
 
             // 事件推送（无 id，有 event）
             if (msg.event) {
-                for (const listener of eventListeners) {
-                    try {
-                        listener(msg)
-                    } catch (e) {
-                        console.error('[AudioEngine] Event listener error:', e)
-                    }
-                }
+                emitEvent(msg)
             }
         })
 
         // stderr 转发到控制台
-        engineProc.stderr.on('data', (data) => {
+        proc.stderr.on('data', (data) => {
             console.warn('[AudioEngine STDERR]', data.toString().trim())
         })
 
-        engineProc.on('error', (err) => {
+        proc.on('error', (err) => {
             console.error('[AudioEngine] Process error:', err)
-            if (!readyResolved) {
-                readyResolved = true
-                reject(err)
-            }
+            cleanup(proc)
+            settleStartup(reject, err)
         })
 
-        engineProc.on('exit', (code, signal) => {
+        proc.on('exit', (code, signal) => {
             console.log(`[AudioEngine] Exited with code=${code} signal=${signal}`)
-            cleanup()
-            if (!readyResolved) {
-                readyResolved = true
-                reject(new Error(`Engine exited unexpectedly: code=${code}`))
+            const stoppedUnexpectedly = engineInfo !== null && engineProc === proc
+            if (stoppedUnexpectedly) {
+                emitEvent({ event: 'stopped', code, signal })
             }
+            cleanup(proc)
+            settleStartup(reject, new Error(`Engine exited unexpectedly: code=${code}`))
         })
 
         // 5 秒超时
-        setTimeout(() => {
-            if (!readyResolved) {
-                readyResolved = true
-                reject(new Error('Audio engine startup timeout (5s)'))
-            }
+        startupTimeout = setTimeout(() => {
+            settleStartup(reject, new Error('Audio engine startup timeout (5s)'))
+            stopEngine()
         }, 5000)
+    })
+
+    return startPromise.finally(() => {
+        startPromise = null
     })
 }
 
@@ -191,23 +217,26 @@ function onEvent(callback) {
  */
 function stopEngine() {
     if (engineProc) {
+        const proc = engineProc
         try {
-            engineProc.stdin.end()
-            engineProc.kill('SIGTERM')
+            proc.stdin.end()
+            proc.kill('SIGTERM')
         } catch (_) {}
 
         // 强制杀死（1秒后）
         setTimeout(() => {
             try {
-                if (engineProc) engineProc.kill('SIGKILL')
+                if (proc.exitCode === null) proc.kill('SIGKILL')
             } catch (_) {}
         }, 1000)
+        cleanup(proc)
     }
-    cleanup()
 }
 
-function cleanup() {
+function cleanup(expectedProc = engineProc) {
+    if (expectedProc && engineProc !== expectedProc) return
     engineProc = null
+    engineInfo = null
     if (lineReader) {
         lineReader.close()
         lineReader = null
@@ -223,7 +252,7 @@ function cleanup() {
  * 检查引擎是否正在运行
  */
 function isRunning() {
-    return engineProc !== null && !engineProc.killed
+    return engineProc !== null && !engineProc.killed && engineInfo !== null
 }
 
 module.exports = {

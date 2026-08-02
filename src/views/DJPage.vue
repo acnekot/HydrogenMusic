@@ -1,11 +1,14 @@
 <template>
     <div class="dj-page">
         <div class="dj-header">
-            <div class="dj-title">DJ</div>
+            <div class="dj-title">DJ <span>EXPERIMENTAL</span></div>
             <div class="dj-engine-status" :class="{ active: djStore.engineRunning }">
                 <span class="status-dot"></span>
                 {{ djStore.engineRunning ? 'ENGINE ON' : 'ENGINE OFF' }}
             </div>
+            <button class="engine-button" :disabled="engineStarting" @click="toggleEngine">
+                {{ engineStarting ? '启动中…' : djStore.engineRunning ? '停止引擎' : '启动引擎' }}
+            </button>
             <div class="dj-master">
                 <span class="master-label">MASTER</span>
                 <input
@@ -13,9 +16,21 @@
                     class="dj-slider master-volume"
                     min="0" max="1" step="0.01"
                     :value="djStore.masterVolume"
+                    :disabled="!djStore.engineRunning"
                     @input="djStore.setMasterVolume(Number($event.target.value))"
                 />
             </div>
+        </div>
+
+        <div class="experimental-notice">
+            <div>
+                双 Deck 音频仍是实验功能，请先降低系统音量再手动启动。VST3 托管尚未实现，相关槽位已停用。
+            </div>
+            <div v-if="djStore.engineInfo" class="engine-details">
+                {{ djStore.engineInfo.outputDevice }} · {{ djStore.engineInfo.sampleRate }} Hz ·
+                {{ djStore.engineInfo.channels }} ch
+            </div>
+            <div v-if="djStore.engineError" class="engine-error">{{ djStore.engineError }}</div>
         </div>
 
         <div class="dj-decks-row">
@@ -33,26 +48,35 @@
             <FXChain :deck="1" />
             <EQPanel :deck="1" />
         </div>
-
-        <VSTBrowser v-if="djStore.vstBrowserOpen" />
     </div>
 </template>
 
 <script setup>
-import { onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { useDjStore } from '../store/djStore'
 import DeckPanel from '../components/dj/DeckPanel.vue'
 import Crossfader from '../components/dj/Crossfader.vue'
 import EQPanel from '../components/dj/EQPanel.vue'
 import FXChain from '../components/dj/FXChain.vue'
-import VSTBrowser from '../components/dj/VSTBrowser.vue'
 
 const djStore = useDjStore()
+const engineStarting = ref(false)
 
-onMounted(async () => {
-    if (!djStore.engineRunning) {
-        await djStore.startEngine()
+async function toggleEngine() {
+    if (djStore.engineRunning) {
+        await djStore.stopEngine()
+        return
     }
+    engineStarting.value = true
+    try {
+        await djStore.startEngine()
+    } finally {
+        engineStarting.value = false
+    }
+}
+
+onMounted(() => {
+    if (djStore.engineRunning) djStore._startPositionPolling()
 })
 
 onUnmounted(() => {
@@ -86,6 +110,51 @@ onUnmounted(() => {
     font-family: 'Gilroy-ExtraBold', sans-serif;
     font-size: 20px;
     letter-spacing: 2px;
+
+    span {
+        margin-left: 5px;
+        color: #ffb347;
+        font-size: 9px;
+        letter-spacing: 1px;
+        vertical-align: middle;
+    }
+}
+
+.engine-button {
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 10px;
+    background: var(--layer);
+    color: var(--text);
+    cursor: pointer;
+
+    &:disabled {
+        cursor: wait;
+        opacity: 0.6;
+    }
+}
+
+.experimental-notice {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 8px;
+    border: 1px solid rgba(255, 179, 71, 0.35);
+    border-radius: 6px;
+    background: rgba(255, 179, 71, 0.08);
+    color: var(--muted-text);
+    font-size: 10px;
+    flex-shrink: 0;
+}
+
+.engine-details {
+    margin-left: auto;
+    white-space: nowrap;
+    color: var(--text);
+}
+
+.engine-error {
+    color: #ff6666;
 }
 
 .dj-engine-status {

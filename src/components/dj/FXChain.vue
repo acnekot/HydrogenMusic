@@ -1,6 +1,9 @@
 <template>
-    <div class="fx-chain">
-        <div class="fx-label">FX {{ deck === 0 ? 'A' : 'B' }}</div>
+    <div class="fx-chain" :class="{ disabled: !djStore.vst3HostingAvailable }">
+        <div class="fx-label">
+            FX {{ deck === 0 ? 'A' : 'B' }}
+            <span v-if="!djStore.vst3HostingAvailable" class="fx-unavailable">VST3 未实现</span>
+        </div>
         <div class="fx-slots">
             <div
                 class="fx-slot"
@@ -65,6 +68,20 @@ function handleDryWet(slot, e) {
     font-size: 10px;
     letter-spacing: 1px;
     color: var(--muted-text);
+}
+
+.fx-unavailable {
+    margin-left: 6px;
+    color: #ffb347;
+}
+
+.fx-chain.disabled .fx-slot {
+    opacity: 0.55;
+}
+
+.fx-chain.disabled .fx-slot-name {
+    cursor: not-allowed;
+    text-decoration: none;
 }
 
 .fx-slots {

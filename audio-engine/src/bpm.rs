@@ -45,7 +45,10 @@ pub fn detect_bpm(interleaved_stereo: &[f32], sample_rate: u32) -> BpmResult {
     }
 
     if envelope.len() < 2 {
-        return BpmResult { bpm: 120.0, confidence: 0.0 };
+        return BpmResult {
+            bpm: 120.0,
+            confidence: 0.0,
+        };
     }
 
     // 归一化包络
@@ -66,7 +69,10 @@ pub fn detect_bpm(interleaved_stereo: &[f32], sample_rate: u32) -> BpmResult {
     let max_lag = max_lag.min(envelope.len() / 2);
 
     if min_lag >= max_lag {
-        return BpmResult { bpm: 120.0, confidence: 0.0 };
+        return BpmResult {
+            bpm: 120.0,
+            confidence: 0.0,
+        };
     }
 
     let n = envelope.len();
@@ -93,7 +99,11 @@ pub fn detect_bpm(interleaved_stereo: &[f32], sample_rate: u32) -> BpmResult {
     }
 
     let bpm = envelope_sr * 60.0 / best_lag as f64;
-    let avg_corr = if count > 0 { total_corr / count as f64 } else { 0.0 };
+    let avg_corr = if count > 0 {
+        total_corr / count as f64
+    } else {
+        0.0
+    };
     let confidence = if avg_corr > 0.0 {
         ((best_corr / avg_corr) - 1.0).clamp(0.0, 1.0)
     } else {

@@ -1,26 +1,40 @@
-mod engine;
-mod deck;
-mod crossfader;
-mod eq;
-mod vst3_host;
 mod bpm;
-mod waveform;
+mod crossfader;
+mod deck;
+mod engine;
+mod eq;
 mod rpc;
+mod waveform;
 
-use std::io::{self, BufRead, Write};
 use serde_json::Value;
+use std::io::{self, BufRead, Write};
 
 fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    // Send ready event
-    let ready = serde_json::json!({"event": "ready", "version": env!("CARGO_PKG_VERSION")});
+    let engine = match engine::AudioEngine::new() {
+        Ok(engine) => engine,
+        Err(error) => {
+            let fatal = serde_json::json!({"event": "fatal", "message": error});
+            let _ = writeln!(out, "{}", fatal);
+            let _ = out.flush();
+            std::process::exit(1);
+        }
+    };
+    let info = engine.info();
+    let ready = serde_json::json!({
+        "event": "ready",
+        "version": env!("CARGO_PKG_VERSION"),
+        "sampleRate": info.sample_rate,
+        "channels": info.channels,
+        "sampleFormat": info.sample_format,
+        "outputDevice": info.output_device,
+        "capabilities": { "vst3Hosting": false }
+    });
     writeln!(out, "{}", ready).unwrap();
     out.flush().unwrap();
-
-    let engine = engine::AudioEngine::new();
 
     for line in stdin.lock().lines() {
         let line = match line {

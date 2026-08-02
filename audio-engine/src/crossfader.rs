@@ -34,9 +34,7 @@ impl Crossfader {
     pub fn get_gains(&self) -> (f32, f32) {
         let p = self.position;
         match self.curve {
-            CrossfaderCurve::Linear => {
-                (1.0 - p, p)
-            }
+            CrossfaderCurve::Linear => (1.0 - p, p),
             CrossfaderCurve::EqualPower => {
                 let angle = p * std::f32::consts::FRAC_PI_2;
                 (angle.cos(), angle.sin())

@@ -1,13 +1,7 @@
-/// 波形数据生成
-///
-/// 波形可视化由 deck.rs 中的 `get_waveform()` 方法直接实现。
-/// 本模块保留用于未来扩展（如频率分离着色的波形）。
+//! Waveform thumbnail helpers used outside the realtime audio callback.
 
 /// 从交错立体声数据生成 RMS 缩略图
-pub fn generate_rms_thumbnail(
-    interleaved_stereo: &[f32],
-    target_width: usize,
-) -> Vec<f32> {
+pub fn generate_rms_thumbnail(interleaved_stereo: &[f32], target_width: usize) -> Vec<f32> {
     if interleaved_stereo.is_empty() || target_width == 0 {
         return vec![0.0; target_width];
     }
@@ -31,7 +25,8 @@ pub fn generate_rms_thumbnail(
         for f in start..end {
             let idx = f * 2;
             if idx + 1 < interleaved_stereo.len() {
-                let mono = (interleaved_stereo[idx] as f64 + interleaved_stereo[idx + 1] as f64) * 0.5;
+                let mono =
+                    (interleaved_stereo[idx] as f64 + interleaved_stereo[idx + 1] as f64) * 0.5;
                 rms += mono * mono;
             }
         }
@@ -40,16 +35,4 @@ pub fn generate_rms_thumbnail(
     }
 
     result
-}
-
-/// 生成频率分段波形（低/中/高三色）
-/// 返回三个通道的 RMS 值，供前端分色渲染
-pub fn generate_frequency_bands_thumbnail(
-    _interleaved_stereo: &[f32],
-    _sample_rate: u32,
-    _target_width: usize,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    // TODO: 通过 FFT 分频后分别计算 RMS
-    // 低频: 0-200Hz, 中频: 200-4000Hz, 高频: 4000Hz+
-    unimplemented!("frequency band waveform not yet implemented")
 }

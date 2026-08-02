@@ -31,6 +31,7 @@ export const useDjStore = defineStore('djStore', {
         // 引擎状态
         engineRunning: false,
         engineError: null,
+        engineInfo: null,
 
         // 双 Deck
         decks: [createDefaultDeck(), createDefaultDeck()],
@@ -60,6 +61,8 @@ export const useDjStore = defineStore('djStore', {
 
         // 位置更新定时器 ID（不持久化）
         _positionPollTimer: null,
+        _positionPollBusy: false,
+        _subscribed: false,
     }),
 
     getters: {
@@ -68,25 +71,45 @@ export const useDjStore = defineStore('djStore', {
 
         deckABpm: (state) => state.decks[0].bpm,
         deckBBpm: (state) => state.decks[1].bpm,
+        sampleRate: (state) => state.engineInfo?.sampleRate || 44100,
+        vst3HostingAvailable: (state) => state.engineInfo?.capabilities?.vst3Hosting === true,
     },
 
     actions: {
         // ===== 引擎生命周期 =====
 
         async startEngine() {
-            if (this.engineRunning) return
+            if (this.engineRunning) return true
             try {
                 const result = await window.djApi.start()
                 if (result.ok) {
                     this.engineRunning = true
                     this.engineError = null
-                    window.djApi.subscribe()
+                    this.engineInfo = result.engine || null
+                    if (!this._subscribed) {
+                        window.djApi.subscribe()
+                        window.djApi.onEvent((event) => {
+                            if (event?.event === 'stopped' || event?.event === 'fatal') {
+                                this._stopPositionPolling()
+                                this.engineRunning = false
+                                this.engineInfo = null
+                                this.engineError = event.message || 'DJ 音频引擎已意外停止'
+                                this.decks.forEach((deck) => { deck.playing = false })
+                            }
+                        })
+                        this._subscribed = true
+                    }
                     this._startPositionPolling()
+                    return true
                 } else {
                     this.engineError = result.error || 'Unknown error'
+                    this.engineInfo = null
+                    return false
                 }
             } catch (e) {
                 this.engineError = e.message
+                this.engineInfo = null
+                return false
             }
         },
 
@@ -96,12 +119,16 @@ export const useDjStore = defineStore('djStore', {
                 await window.djApi.stop()
             } catch (_) {}
             this.engineRunning = false
+            this.engineInfo = null
+            this.decks = [createDefaultDeck(), createDefaultDeck()]
         },
 
         // ===== Deck 操作 =====
 
         async loadTrack(deck, { path, title, artist, cover }) {
-            if (!this.engineRunning) await this.startEngine()
+            if (!this.engineRunning) {
+                throw new Error('请先手动启动实验性 DJ 音频引擎')
+            }
             try {
                 await window.djApi.call('deck.load', { deck, path })
                 this.decks[deck].loaded = true
@@ -210,6 +237,9 @@ export const useDjStore = defineStore('djStore', {
         // ===== FX Chain =====
 
         async loadFx(deck, slot, pluginId, pluginName) {
+            if (!this.vst3HostingAvailable) {
+                throw new Error('VST3 托管尚未实现，当前版本不会加载插件')
+            }
             await window.djApi.call('vst3.load', { deck, slot, pluginId })
             this.decks[deck].fxChain[slot].pluginId = pluginId
             this.decks[deck].fxChain[slot].pluginName = pluginName
@@ -236,6 +266,10 @@ export const useDjStore = defineStore('djStore', {
         // ===== VST3 扫描 =====
 
         async scanVst3() {
+            if (!this.vst3HostingAvailable) {
+                this.engineError = 'VST3 托管尚未实现，扫描和加载功能已停用'
+                return
+            }
             if (this.vst3ScanPaths.length === 0) return
             this.vst3Scanning = true
             try {
@@ -266,17 +300,24 @@ export const useDjStore = defineStore('djStore', {
         _startPositionPolling() {
             this._stopPositionPolling()
             this._positionPollTimer = setInterval(async () => {
-                for (let d = 0; d < 2; d++) {
-                    if (!this.decks[d].loaded) continue
-                    try {
-                        const pos = await window.djApi.call('deck.getPosition', { deck: d })
-                        this.decks[d].position = pos.positionSamples
-                        if (pos.bpm && !this.decks[d].bpm) {
-                            this.decks[d].bpm = pos.bpm
-                        }
-                    } catch (_) {}
+                if (this._positionPollBusy) return
+                this._positionPollBusy = true
+                try {
+                    for (let d = 0; d < 2; d++) {
+                        if (!this.decks[d].loaded) continue
+                        try {
+                            const pos = await window.djApi.call('deck.getPosition', { deck: d })
+                            this.decks[d].position = pos.positionSamples
+                            this.decks[d].playing = pos.playing === true
+                            if (pos.bpm && !this.decks[d].bpm) {
+                                this.decks[d].bpm = pos.bpm
+                            }
+                        } catch (_) {}
+                    }
+                } finally {
+                    this._positionPollBusy = false
                 }
-            }, 50) // 50ms = 20fps 位置更新
+            }, 100)
         },
 
         _stopPositionPolling() {
@@ -284,11 +325,16 @@ export const useDjStore = defineStore('djStore', {
                 clearInterval(this._positionPollTimer)
                 this._positionPollTimer = null
             }
+            this._positionPollBusy = false
         },
 
         // ===== VST 浏览器 =====
 
         openVstBrowser(deck, slot) {
+            if (!this.vst3HostingAvailable) {
+                this.engineError = 'VST3 托管尚未实现，当前版本不会扫描或加载插件'
+                return
+            }
             this.vstBrowserTarget = { deck, slot }
             this.vstBrowserOpen = true
         },

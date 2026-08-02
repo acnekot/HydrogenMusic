@@ -1,5 +1,5 @@
-use serde_json::Value;
 use crate::engine::AudioEngine;
+use serde_json::Value;
 
 pub fn dispatch(engine: &AudioEngine, method: &str, params: &Value) -> Result<Value, String> {
     match method {
@@ -27,7 +27,9 @@ pub fn dispatch(engine: &AudioEngine, method: &str, params: &Value) -> Result<Va
         }
         "deck.seek" => {
             let deck = get_deck_index(params)?;
-            let position = params["positionSamples"].as_u64().ok_or("missing positionSamples")?;
+            let position = params["positionSamples"]
+                .as_u64()
+                .ok_or("missing positionSamples")?;
             engine.seek(deck, position as usize);
             Ok(Value::Bool(true))
         }
@@ -43,7 +45,8 @@ pub fn dispatch(engine: &AudioEngine, method: &str, params: &Value) -> Result<Va
             Ok(serde_json::json!({
                 "positionSamples": pos.position_samples,
                 "durationSamples": pos.duration_samples,
-                "bpm": pos.bpm
+                "bpm": pos.bpm,
+                "playing": pos.playing
             }))
         }
 
@@ -51,7 +54,9 @@ pub fn dispatch(engine: &AudioEngine, method: &str, params: &Value) -> Result<Va
         "deck.setCue" => {
             let deck = get_deck_index(params)?;
             let cue_index = params["cueIndex"].as_u64().ok_or("missing cueIndex")? as usize;
-            let position = params["positionSamples"].as_u64().ok_or("missing positionSamples")? as usize;
+            let position = params["positionSamples"]
+                .as_u64()
+                .ok_or("missing positionSamples")? as usize;
             engine.set_cue(deck, cue_index, position);
             Ok(Value::Bool(true))
         }
@@ -92,9 +97,8 @@ pub fn dispatch(engine: &AudioEngine, method: &str, params: &Value) -> Result<Va
 
         // ===== 全局 10 段均衡器 =====
         "eq.setGlobal" => {
-            let bands: Vec<f64> = serde_json::from_value(
-                params["bands"].clone()
-            ).map_err(|e| e.to_string())?;
+            let bands: Vec<f64> =
+                serde_json::from_value(params["bands"].clone()).map_err(|e| e.to_string())?;
             let bands_f32: Vec<f32> = bands.iter().map(|&v| v as f32).collect();
             engine.set_global_eq(&bands_f32)?;
             Ok(Value::Bool(true))
@@ -105,50 +109,12 @@ pub fn dispatch(engine: &AudioEngine, method: &str, params: &Value) -> Result<Va
             Ok(Value::Bool(true))
         }
 
-        // ===== VST3 =====
-        "vst3.scan" => {
-            let paths: Vec<String> = serde_json::from_value(
-                params["paths"].clone()
-            ).map_err(|e| e.to_string())?;
-            let plugins = engine.scan_vst3(&paths)?;
-            Ok(serde_json::to_value(plugins).unwrap())
-        }
-        "vst3.load" => {
-            let deck = get_deck_index(params)?;
-            let slot = params["slot"].as_u64().ok_or("missing slot")? as usize;
-            let plugin_id = params["pluginId"].as_str().ok_or("missing pluginId")?;
-            engine.load_vst3(deck, slot, plugin_id)?;
-            Ok(Value::Bool(true))
-        }
-        "vst3.unload" => {
-            let deck = get_deck_index(params)?;
-            let slot = params["slot"].as_u64().ok_or("missing slot")? as usize;
-            engine.unload_vst3(deck, slot);
-            Ok(Value::Bool(true))
-        }
-        "vst3.getParams" => {
-            let deck = get_deck_index(params)?;
-            let slot = params["slot"].as_u64().ok_or("missing slot")? as usize;
-            let p = engine.get_vst3_params(deck, slot)?;
-            Ok(serde_json::to_value(p).unwrap())
-        }
-
-        // ===== FX 参数 =====
-        "fx.setParam" => {
-            let deck = get_deck_index(params)?;
-            let slot = params["slot"].as_u64().ok_or("missing slot")? as usize;
-            let param_id = params["paramId"].as_u64().ok_or("missing paramId")? as u32;
-            let value = get_f64(params, "value")?;
-            engine.set_fx_param(deck, slot, param_id, value);
-            Ok(Value::Bool(true))
-        }
-        "fx.setDryWet" => {
-            let deck = get_deck_index(params)?;
-            let slot = params["slot"].as_u64().ok_or("missing slot")? as usize;
-            let value = get_f64(params, "value")?;
-            engine.set_fx_dry_wet(deck, slot, value as f32);
-            Ok(Value::Bool(true))
-        }
+        // VST3 hosting is intentionally unavailable until a real realtime-safe host exists.
+        "vst3.scan" | "vst3.load" | "vst3.unload" | "vst3.getParams" | "fx.setParam"
+        | "fx.setDryWet" => Err(
+            "VST3 hosting is not implemented; the experimental DJ engine cannot load plugins"
+                .to_string(),
+        ),
 
         // ===== 波形 =====
         "waveform.request" => {
@@ -176,7 +142,7 @@ pub fn dispatch(engine: &AudioEngine, method: &str, params: &Value) -> Result<Va
         }
         "bpm.sync" => {
             let source = get_deck_index(params)?;
-            let target = params["targetDeck"].as_u64().ok_or("missing targetDeck")? as usize;
+            let target = get_bounded_index(params, "targetDeck", 2)?;
             engine.sync_bpm(source, target)?;
             Ok(Value::Bool(true))
         }
@@ -196,12 +162,20 @@ pub fn dispatch(engine: &AudioEngine, method: &str, params: &Value) -> Result<Va
 }
 
 fn get_deck_index(params: &Value) -> Result<usize, String> {
-    params["deck"]
+    get_bounded_index(params, "deck", 2)
+}
+
+fn get_bounded_index(params: &Value, key: &str, upper_bound: usize) -> Result<usize, String> {
+    params[key]
         .as_u64()
         .map(|v| v as usize)
-        .ok_or_else(|| "missing deck index".to_string())
+        .ok_or_else(|| format!("missing or invalid {key}"))
         .and_then(|d| {
-            if d < 2 { Ok(d) } else { Err(format!("invalid deck index: {}", d)) }
+            if d < upper_bound {
+                Ok(d)
+            } else {
+                Err(format!("invalid {key}: {d}"))
+            }
         })
 }
 

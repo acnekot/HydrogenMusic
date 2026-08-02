@@ -19,7 +19,8 @@ impl DeckEqualizer {
             sr.hz(),
             1000.0.hz(),
             Q_BUTTERWORTH_F32,
-        ).unwrap();
+        )
+        .unwrap();
 
         DeckEqualizer {
             low_l: DirectForm1::<f32>::new(flat),
@@ -46,7 +47,8 @@ impl DeckEqualizer {
             self.sample_rate.hz(),
             freq.hz(),
             Q_BUTTERWORTH_F32,
-        ).map_err(|e| format!("EQ coefficients error: {:?}", e))?;
+        )
+        .map_err(|e| format!("EQ coefficients error: {:?}", e))?;
 
         for f in filters {
             f.replace_coefficients(coeffs);
@@ -80,8 +82,7 @@ pub struct GlobalEqualizer {
 }
 
 const GLOBAL_EQ_FREQUENCIES: [f32; 10] = [
-    31.0, 63.0, 125.0, 250.0, 500.0,
-    1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
+    31.0, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
 ];
 
 impl GlobalEqualizer {
@@ -92,7 +93,8 @@ impl GlobalEqualizer {
             sr.hz(),
             1000.0.hz(),
             Q_BUTTERWORTH_F32,
-        ).unwrap();
+        )
+        .unwrap();
 
         let bands_l: Vec<_> = (0..10).map(|_| DirectForm1::<f32>::new(flat)).collect();
         let bands_r: Vec<_> = (0..10).map(|_| DirectForm1::<f32>::new(flat)).collect();
@@ -117,7 +119,8 @@ impl GlobalEqualizer {
                 self.sample_rate.hz(),
                 self.frequencies[i].hz(),
                 Q_BUTTERWORTH_F32,
-            ).map_err(|e| format!("EQ band {} error: {:?}", i, e))?;
+            )
+            .map_err(|e| format!("EQ band {} error: {:?}", i, e))?;
 
             self.bands_l[i].replace_coefficients(coeffs);
             self.bands_r[i].replace_coefficients(coeffs);
