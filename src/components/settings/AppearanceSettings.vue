@@ -59,294 +59,423 @@ watch(
 </script>
 
 <template>
-    <section class="appearance-settings">
-        <h2>外观与歌词</h2>
-        <div class="section-line"></div>
+    <section class="settings-item appearance-settings">
+        <h2 class="item-title">外观与歌词</h2>
+        <div class="line"></div>
 
-        <div class="setting-row">
-            <span>当前歌词跟随位置</span>
-            <Selector v-model="playerStore.lyricFollowPosition" :options="followOptions" />
-        </div>
+        <div class="item-options">
+            <div class="option">
+                <div class="option-name">当前歌词跟随位置</div>
+                <div class="option-operation">
+                    <Selector v-model="playerStore.lyricFollowPosition" :options="followOptions" />
+                </div>
+            </div>
 
-        <div class="setting-row">
-            <span>歌词可视化</span>
-            <button type="button" class="switch" :class="{ active: playerStore.lyricVisualizer }" @click="toggleLyricVisualizer">
-                {{ playerStore.lyricVisualizer ? '已开启' : '已关闭' }}
-            </button>
-        </div>
+            <div class="option">
+                <div class="option-name">歌词可视化</div>
+                <div class="option-operation">
+                    <div class="toggle" @click="toggleLyricVisualizer">
+                        <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.lyricVisualizer }">
+                            {{ playerStore.lyricVisualizer ? '已开启' : '已关闭' }}
+                        </div>
+                        <Transition name="toggle">
+                            <div v-show="playerStore.lyricVisualizer" class="toggle-on"></div>
+                        </Transition>
+                    </div>
+                </div>
+            </div>
 
-        <div v-if="playerStore.lyricVisualizer" class="advanced-panel">
-            <label class="setting-row">
-                <span>显示高度</span>
-                <span class="range-control">
-                    <input v-model.number="playerStore.lyricVisualizerHeight" type="range" min="80" max="480" step="1" />
-                    <output>{{ playerStore.lyricVisualizerHeight }} px</output>
-                </span>
-            </label>
-            <div class="setting-row split-inputs">
-                <span>频率范围</span>
-                <span>
-                    <input v-model.number="playerStore.lyricVisualizerFrequencyMin" type="number" min="20" max="19990" />
-                    <b>—</b>
-                    <input v-model.number="playerStore.lyricVisualizerFrequencyMax" type="number" min="30" max="20000" />
-                    <em>Hz</em>
-                </span>
+            <template v-if="playerStore.lyricVisualizer">
+                <div class="option">
+                    <div class="option-name">显示高度</div>
+                    <div class="option-operation range-option">
+                        <input v-model.number="playerStore.lyricVisualizerHeight" type="range" min="80" max="480" step="1" />
+                        <output>{{ playerStore.lyricVisualizerHeight }} px</output>
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">频率范围</div>
+                    <div class="option-operation compound-input">
+                        <input v-model.number="playerStore.lyricVisualizerFrequencyMin" aria-label="最低频率" type="number" min="20" max="19990" />
+                        <b>—</b>
+                        <input v-model.number="playerStore.lyricVisualizerFrequencyMax" aria-label="最高频率" type="number" min="30" max="20000" />
+                        <em>Hz</em>
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">动画平滑度</div>
+                    <div class="option-operation range-option">
+                        <input v-model.number="playerStore.lyricVisualizerTransitionDelay" type="range" min="0" max="0.95" step="0.05" />
+                        <output>{{ Math.round(playerStore.lyricVisualizerTransitionDelay * 100) }}%</output>
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">柱条数量</div>
+                    <div class="option-operation range-option">
+                        <input v-model.number="playerStore.lyricVisualizerBarCount" type="range" min="8" max="128" step="1" />
+                        <output>{{ playerStore.lyricVisualizerBarCount }}</output>
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">柱条宽度</div>
+                    <div class="option-operation range-option">
+                        <input v-model.number="playerStore.lyricVisualizerBarWidth" type="range" min="10" max="100" step="1" />
+                        <output>{{ playerStore.lyricVisualizerBarWidth }}%</output>
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">不透明度</div>
+                    <div class="option-operation range-option">
+                        <input v-model.number="playerStore.lyricVisualizerOpacity" type="range" min="0" max="100" step="1" />
+                        <output>{{ playerStore.lyricVisualizerOpacity }}%</output>
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">绘制样式</div>
+                    <div class="option-operation">
+                        <Selector v-model="playerStore.lyricVisualizerStyle" :options="visualizerStyleOptions" />
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">绘制颜色</div>
+                    <div class="option-operation">
+                        <Selector v-model="playerStore.lyricVisualizerColor" :options="visualizerColorOptions" />
+                    </div>
+                </div>
+                <template v-if="playerStore.lyricVisualizerStyle === 'radial'">
+                    <div class="option">
+                        <div class="option-name">环形尺寸</div>
+                        <div class="option-operation range-option">
+                            <input v-model.number="playerStore.lyricVisualizerRadialSize" type="range" min="20" max="200" step="1" />
+                            <output>{{ playerStore.lyricVisualizerRadialSize }}%</output>
+                        </div>
+                    </div>
+                    <div class="option">
+                        <div class="option-name">环形中心空白</div>
+                        <div class="option-operation range-option">
+                            <input v-model.number="playerStore.lyricVisualizerRadialCoreSize" type="range" min="10" max="95" step="1" />
+                            <output>{{ playerStore.lyricVisualizerRadialCoreSize }}%</output>
+                        </div>
+                    </div>
+                    <div class="option">
+                        <div class="option-name">环形位置偏移</div>
+                        <div class="option-operation compound-input">
+                            <input v-model.number="playerStore.lyricVisualizerRadialOffsetX" aria-label="水平偏移" type="number" min="-100" max="100" />
+                            <b>×</b>
+                            <input v-model.number="playerStore.lyricVisualizerRadialOffsetY" aria-label="垂直偏移" type="number" min="-100" max="100" />
+                            <em>%</em>
+                        </div>
+                    </div>
+                </template>
+            </template>
+
+            <div class="option">
+                <div class="option-name">评论正文字号</div>
+                <div class="option-operation range-option">
+                    <input v-model.number="playerStore.commentFontSize" type="range" min="8" max="32" step="1" />
+                    <output>{{ playerStore.commentFontSize }} px</output>
+                </div>
             </div>
-            <label class="setting-row">
-                <span>动画平滑度</span>
-                <span class="range-control">
-                    <input v-model.number="playerStore.lyricVisualizerTransitionDelay" type="range" min="0" max="0.95" step="0.05" />
-                    <output>{{ Math.round(playerStore.lyricVisualizerTransitionDelay * 100) }}%</output>
-                </span>
-            </label>
-            <label class="setting-row">
-                <span>柱条数量</span>
-                <span class="range-control">
-                    <input v-model.number="playerStore.lyricVisualizerBarCount" type="range" min="8" max="128" step="1" />
-                    <output>{{ playerStore.lyricVisualizerBarCount }}</output>
-                </span>
-            </label>
-            <label class="setting-row">
-                <span>柱条宽度</span>
-                <span class="range-control">
-                    <input v-model.number="playerStore.lyricVisualizerBarWidth" type="range" min="10" max="100" step="1" />
-                    <output>{{ playerStore.lyricVisualizerBarWidth }}%</output>
-                </span>
-            </label>
-            <label class="setting-row">
-                <span>不透明度</span>
-                <span class="range-control">
-                    <input v-model.number="playerStore.lyricVisualizerOpacity" type="range" min="0" max="100" step="1" />
-                    <output>{{ playerStore.lyricVisualizerOpacity }}%</output>
-                </span>
-            </label>
-            <div class="setting-row">
-                <span>绘制样式</span>
-                <Selector v-model="playerStore.lyricVisualizerStyle" :options="visualizerStyleOptions" />
+
+            <div class="option">
+                <div class="option-name">界面缩放</div>
+                <div class="option-operation range-option">
+                    <input v-model.number="playerStore.globalZoom" type="range" min="0.5" max="3" step="0.05" />
+                    <output>{{ Math.round(playerStore.globalZoom * 100) }}%</output>
+                </div>
             </div>
-            <div class="setting-row">
-                <span>绘制颜色</span>
-                <Selector v-model="playerStore.lyricVisualizerColor" :options="visualizerColorOptions" />
+
+            <div class="option">
+                <div class="option-name">自定义背景</div>
+                <div class="option-operation">
+                    <div class="toggle" @click="playerStore.customBackgroundEnabled = !playerStore.customBackgroundEnabled">
+                        <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.customBackgroundEnabled }">
+                            {{ playerStore.customBackgroundEnabled ? '已开启' : '已关闭' }}
+                        </div>
+                        <Transition name="toggle">
+                            <div v-show="playerStore.customBackgroundEnabled" class="toggle-on"></div>
+                        </Transition>
+                    </div>
+                </div>
             </div>
-            <template v-if="playerStore.lyricVisualizerStyle === 'radial'">
-                <label class="setting-row">
-                    <span>环形尺寸</span>
-                    <span class="range-control">
-                        <input v-model.number="playerStore.lyricVisualizerRadialSize" type="range" min="20" max="200" step="1" />
-                        <output>{{ playerStore.lyricVisualizerRadialSize }}%</output>
-                    </span>
-                </label>
-                <label class="setting-row">
-                    <span>环形中心空白</span>
-                    <span class="range-control">
-                        <input v-model.number="playerStore.lyricVisualizerRadialCoreSize" type="range" min="10" max="95" step="1" />
-                        <output>{{ playerStore.lyricVisualizerRadialCoreSize }}%</output>
-                    </span>
-                </label>
-                <div class="setting-row split-inputs">
-                    <span>环形位置偏移</span>
-                    <span>
-                        <input v-model.number="playerStore.lyricVisualizerRadialOffsetX" type="number" min="-100" max="100" />
-                        <b>×</b>
-                        <input v-model.number="playerStore.lyricVisualizerRadialOffsetY" type="number" min="-100" max="100" />
-                        <em>%</em>
-                    </span>
+            <div class="option">
+                <div class="option-name">背景图片</div>
+                <div class="option-operation select-download-folder select-background-file">
+                    <output class="selected-folder" :title="playerStore.customBackgroundImage">
+                        {{ playerStore.customBackgroundImage || '待选择' }}
+                    </output>
+                    <button type="button" class="select-option" @click="chooseBackground">选择</button>
+                    <button v-if="playerStore.customBackgroundImage" type="button" class="select-option" @click="clearBackground">清除</button>
+                </div>
+            </div>
+            <template v-if="playerStore.customBackgroundEnabled">
+                <div class="option">
+                    <div class="option-name">背景适配方式</div>
+                    <div class="option-operation">
+                        <Selector v-model="playerStore.customBackgroundMode" :options="backgroundModeOptions" />
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">背景模糊</div>
+                    <div class="option-operation range-option">
+                        <input v-model.number="playerStore.customBackgroundBlur" type="range" min="0" max="80" step="1" />
+                        <output>{{ playerStore.customBackgroundBlur }} px</output>
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">背景亮度</div>
+                    <div class="option-operation range-option">
+                        <input v-model.number="playerStore.customBackgroundBrightness" type="range" min="10" max="200" step="1" />
+                        <output>{{ playerStore.customBackgroundBrightness }}%</output>
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">应用到首页</div>
+                    <div class="option-operation">
+                        <div class="toggle" @click="playerStore.customBackgroundApplyToChrome = !playerStore.customBackgroundApplyToChrome">
+                            <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.customBackgroundApplyToChrome }">
+                                {{ playerStore.customBackgroundApplyToChrome ? '已开启' : '已关闭' }}
+                            </div>
+                            <Transition name="toggle">
+                                <div v-show="playerStore.customBackgroundApplyToChrome" class="toggle-on"></div>
+                            </Transition>
+                        </div>
+                    </div>
+                </div>
+                <div class="option">
+                    <div class="option-name">应用到播放页</div>
+                    <div class="option-operation">
+                        <div class="toggle" @click="playerStore.customBackgroundApplyToPlayer = !playerStore.customBackgroundApplyToPlayer">
+                            <div class="toggle-off" :class="{ 'toggle-on-in': playerStore.customBackgroundApplyToPlayer }">
+                                {{ playerStore.customBackgroundApplyToPlayer ? '已开启' : '已关闭' }}
+                            </div>
+                            <Transition name="toggle">
+                                <div v-show="playerStore.customBackgroundApplyToPlayer" class="toggle-on"></div>
+                            </Transition>
+                        </div>
+                    </div>
                 </div>
             </template>
         </div>
-
-        <label class="setting-row">
-            <span>评论正文字号</span>
-            <span class="range-control">
-                <input v-model.number="playerStore.commentFontSize" type="range" min="8" max="32" step="1" />
-                <output>{{ playerStore.commentFontSize }} px</output>
-            </span>
-        </label>
-
-        <label class="setting-row">
-            <span>界面缩放</span>
-            <span class="range-control">
-                <input v-model.number="playerStore.globalZoom" type="range" min="0.5" max="3" step="0.05" />
-                <output>{{ Math.round(playerStore.globalZoom * 100) }}%</output>
-            </span>
-        </label>
-
-        <div class="setting-row">
-            <span>自定义背景</span>
-            <button type="button" class="switch" :class="{ active: playerStore.customBackgroundEnabled }" @click="playerStore.customBackgroundEnabled = !playerStore.customBackgroundEnabled">
-                {{ playerStore.customBackgroundEnabled ? '已开启' : '已关闭' }}
-            </button>
-        </div>
-        <div class="setting-row background-file">
-            <span>背景图片</span>
-            <span class="file-control">
-                <output :title="playerStore.customBackgroundImage">{{ playerStore.customBackgroundImage || '待选择' }}</output>
-                <button type="button" @click="chooseBackground">选择</button>
-                <button v-if="playerStore.customBackgroundImage" type="button" @click="clearBackground">清除</button>
-            </span>
-        </div>
-        <template v-if="playerStore.customBackgroundEnabled">
-            <div class="setting-row">
-                <span>背景适配方式</span>
-                <Selector v-model="playerStore.customBackgroundMode" :options="backgroundModeOptions" />
-            </div>
-            <label class="setting-row">
-                <span>背景模糊</span>
-                <span class="range-control">
-                    <input v-model.number="playerStore.customBackgroundBlur" type="range" min="0" max="80" step="1" />
-                    <output>{{ playerStore.customBackgroundBlur }} px</output>
-                </span>
-            </label>
-            <label class="setting-row">
-                <span>背景亮度</span>
-                <span class="range-control">
-                    <input v-model.number="playerStore.customBackgroundBrightness" type="range" min="10" max="200" step="1" />
-                    <output>{{ playerStore.customBackgroundBrightness }}%</output>
-                </span>
-            </label>
-            <div class="setting-row">
-                <span>应用到首页</span>
-                <button type="button" class="switch" :class="{ active: playerStore.customBackgroundApplyToChrome }" @click="playerStore.customBackgroundApplyToChrome = !playerStore.customBackgroundApplyToChrome">
-                    {{ playerStore.customBackgroundApplyToChrome ? '是' : '否' }}
-                </button>
-            </div>
-            <div class="setting-row">
-                <span>应用到播放页</span>
-                <button type="button" class="switch" :class="{ active: playerStore.customBackgroundApplyToPlayer }" @click="playerStore.customBackgroundApplyToPlayer = !playerStore.customBackgroundApplyToPlayer">
-                    {{ playerStore.customBackgroundApplyToPlayer ? '是' : '否' }}
-                </button>
-            </div>
-        </template>
     </section>
 </template>
 
 <style scoped lang="scss">
-.appearance-settings {
+.settings-item {
+    margin-top: 45px;
     width: 100%;
-    margin-bottom: 42px;
-    color: #000;
-
-    h2 {
-        margin: 0;
-        font: 24px SourceHanSansCN-Bold;
-        text-align: left;
-    }
-
-    .section-line {
-        width: 100%;
-        height: 1px;
-        margin: 10px 0 15px;
-        background: rgba(0, 0, 0, 0.2);
-    }
 }
 
-.setting-row {
-    min-height: 44px;
-    padding: 7px 0;
+.item-title {
+    margin: 0;
+    color: black;
+    font: 20px SourceHanSansCN-Bold;
+    text-align: left;
+}
+
+.line {
+    margin-top: 8px;
+    margin-bottom: 25px;
+    width: 100%;
+    height: 0.5px;
+    background-color: rgba(0, 0, 0, 0.2);
+}
+
+.item-options {
+    outline: none;
+}
+
+.option {
+    margin-bottom: 32px;
     display: flex;
+    flex-direction: row;
     align-items: center;
     justify-content: space-between;
-    gap: 28px;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-    font: 14px SourceHanSansCN-Bold;
+    gap: 24px;
+}
 
-    > span:first-child {
-        flex: 1;
-        text-align: left;
+.option-name {
+    color: black;
+    font-family: SourceHanSansCN-Bold;
+    font-size: 16px;
+    text-align: left;
+}
+
+.option-operation {
+    flex: 0 0 auto;
+
+    :deep(.selector) {
+        margin-right: 1px;
+        width: 200px;
+        height: 34px;
+        padding: 5px 1px;
+        background-color: transparent;
+        color: black;
+        border: none;
+        outline: none;
+        appearance: none;
+        font: 13px SourceHanSansCN-Bold;
+        text-align: center;
+        transition: 0.2s;
+        box-sizing: border-box;
+
+        &:hover {
+            cursor: pointer;
+            opacity: 0.8;
+            box-shadow: none;
+        }
+    }
+
+    :deep(.selector-head) {
+        padding: 0 10px;
+        line-height: 24px;
     }
 }
 
-.advanced-panel {
-    margin: 6px 0 10px;
-    padding: 5px 16px;
-    background: rgba(0, 0, 0, 0.035);
-    border-left: 3px solid rgba(0, 0, 0, 0.5);
+.toggle {
+    margin-right: 1px;
+    width: 200px;
+    height: 34px;
+    position: relative;
+    overflow: hidden;
+
+    &:hover {
+        cursor: pointer;
+    }
 }
 
-.switch,
-.file-control button {
-    min-width: 72px;
-    padding: 7px 12px;
-    border: 1px solid rgba(0, 0, 0, 0.2);
-    background: rgba(0, 0, 0, 0.08);
-    color: rgba(0, 0, 0, 0.55);
-    font: 12px SourceHanSansCN-Bold;
-    cursor: pointer;
+.toggle-on,
+.toggle-off {
+    padding: 5px 10px;
+    width: 100%;
+    height: 100%;
+    font: 13px SourceHanSansCN-Bold;
+    line-height: 24px;
     transition: 0.2s;
+    box-sizing: border-box;
 }
 
-.switch.active,
-.file-control button:hover {
-    background: #000;
-    color: #fff;
+.toggle-off {
+    background-color: rgba(255, 255, 255, 0.35);
 }
 
-.range-control {
-    width: min(390px, 52%);
+.toggle-on {
+    background-color: black;
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: -1;
+}
+
+.toggle-on-in {
+    color: white;
+    background-color: transparent;
+}
+
+.range-option,
+.compound-input {
+    margin-right: 1px;
+    width: 200px;
+    height: 34px;
+    padding: 5px 8px;
     display: flex;
     align-items: center;
-    gap: 12px;
-
-    input {
-        flex: 1;
-        accent-color: #000;
-    }
-
-    output {
-        width: 64px;
-        text-align: right;
-        font: 12px Bender-Bold, monospace;
-    }
+    background-color: rgba(255, 255, 255, 0.35);
+    box-sizing: border-box;
 }
 
-.split-inputs > span:last-child {
-    display: flex;
-    align-items: center;
+.range-option {
     gap: 8px;
 
     input {
-        width: 88px;
-        padding: 6px 8px;
-        border: 1px solid rgba(0, 0, 0, 0.18);
-        background: rgba(255, 255, 255, 0.5);
+        min-width: 0;
+        flex: 1;
+        accent-color: black;
+        cursor: pointer;
+    }
+
+    output {
+        width: 58px;
+        flex: 0 0 auto;
+        font: 13px SourceHanSansCN-Bold;
+        text-align: right;
+    }
+}
+
+.compound-input {
+    justify-content: space-between;
+    gap: 4px;
+
+    input {
+        min-width: 0;
+        width: 58px;
+        padding: 0;
+        background: transparent;
+        border: none;
         outline: none;
+        appearance: textfield;
+        font: 13px SourceHanSansCN-Bold;
+        text-align: center;
+
+        &::-webkit-inner-spin-button,
+        &::-webkit-outer-spin-button {
+            appearance: none;
+        }
     }
 
     b,
     em {
-        color: rgba(0, 0, 0, 0.45);
-        font: 11px Bender-Bold, monospace;
+        font: 11px SourceHanSansCN-Bold;
     }
 }
 
-.file-control {
-    width: min(520px, 66%);
+.select-background-file {
     display: flex;
+    flex-direction: row;
     align-items: center;
-    justify-content: flex-end;
-    gap: 7px;
 
-    output {
-        flex: 1;
+    .selected-folder {
+        width: min(50vw, 520px);
+        height: 30px;
+        padding: 0 8px;
+        background-color: rgba(255, 255, 255, 0.35);
+        color: black;
+        font: 13px SourceHanSansCN-Bold;
+        line-height: 30px;
+        text-align: left;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        color: rgba(0, 0, 0, 0.55);
-        font: 12px SourceHanSansCN-Bold;
-        text-align: right;
+        box-sizing: border-box;
+    }
+
+    .select-option {
+        margin-right: 2px;
+        margin-left: 15px;
+        padding: 5px 15px;
+        color: black;
+        background-color: rgba(255, 255, 255, 0.35);
+        border: none;
+        outline: none;
+        font: 13px SourceHanSansCN-Bold;
+        transition: 0.2s;
+
+        &:hover {
+            cursor: pointer;
+            opacity: 0.8;
+            box-shadow: 0 0 0 1px black;
+        }
     }
 }
 
-@media (max-width: 760px) {
-    .setting-row {
-        align-items: flex-start;
-        flex-direction: column;
-        gap: 8px;
-    }
+:global(.dark) .range-option,
+:global(.dark) .compound-input,
+:global(.dark) .select-background-file .selected-folder,
+:global(.dark) .select-background-file .select-option {
+    background-color: var(--layer) !important;
+}
 
-    .range-control,
-    .file-control {
-        width: 100%;
-    }
+:global(.dark) .range-option input {
+    accent-color: var(--text);
 }
 </style>
