@@ -9,6 +9,7 @@
   import { getDjSubList } from '../api/dj'
   import { useLibraryStore } from '../store/libraryStore'
   import { useLocalStore } from '../store/localStore'
+  import { resolveFavoritePlaylistMeta } from '../utils/favoritePlaylist'
   import { storeToRefs } from 'pinia'
   import { scanMusic } from '../utils/locaMusic.js'
 
@@ -16,7 +17,7 @@
   const { user } = storeToRefs(userStore)
   const libraryStore = useLibraryStore()
   const { changeLibraryList, updateUserPlaylistCount, updateUserPlaylist } = libraryStore
-  const { libraryList, libraryListAlbum, libraryListAritist, listType1, listType2, playlistOverviewVersion } = storeToRefs(libraryStore)
+  const { libraryList, libraryListAlbum, libraryListAritist, listType1, listType2, playlistOverviewVersion, playlistOverviewRefreshSilent } = storeToRefs(libraryStore)
   const localStore = useLocalStore()
 
   const typeTracker = ref(0)
@@ -48,7 +49,17 @@
     libraryListAritist.value = null
   }
 
-  async function loadUserPlaylist(requestToken, requestUserId) {
+  function syncFavoritePlaylistTrackCount() {
+    if (!Array.isArray(userStore.likelist)) return
+
+    const favoritePlaylist = resolveFavoritePlaylistMeta(libraryStore.playlistUserCreated, user.value?.userId)
+    const playlistId = userStore.favoritePlaylistId || favoritePlaylist?.id
+    if (!playlistId) return
+
+    libraryStore.setPlaylistOverviewTrackCount(playlistId, userStore.likelist.length)
+  }
+
+  async function loadUserPlaylist(requestToken, requestUserId, options = {}) {
     if (!requestUserId) {
       clearAccountLibraryLists()
       return false
@@ -62,15 +73,16 @@
     }
 
     try {
-      const listCount = await getUserPlaylistCount()
+      const listCount = await getUserPlaylistCount(options)
       if (!isLibraryRequestActive(requestToken, requestUserId)) return false
 
       updateUserPlaylistCount(listCount)
 
-      const list = await getUserPlaylist(params)
+      const list = await getUserPlaylist(params, options)
       if (!isLibraryRequestActive(requestToken, requestUserId)) return false
 
       updateUserPlaylist(Array.isArray(list?.playlist) ? list.playlist : [])
+      syncFavoritePlaylistTrackCount()
       lastHandledPlaylistOverviewVersion.value = playlistOverviewVersion.value
       lastLoadedUserId.value = requestUserId
       return true
@@ -129,9 +141,17 @@
     }
   }
 
-  async function refreshCurrentSection() {
+  async function refreshCurrentSection(options = {}) {
     const requestUserId = getCurrentUserId()
     const requestToken = ++libraryRequestToken
+
+    if (userStore.localOnlyMode) {
+      option.value = 3
+      typeTracker.value = 3
+      listType1.value = 3
+      listType2.value = typeFour.value
+      return true
+    }
 
     if ((option.value == 0 || option.value == 1) && !requestUserId) {
       clearAccountLibraryLists()
@@ -139,7 +159,7 @@
     }
 
     if (option.value == 0) {
-      const loaded = await loadUserPlaylist(requestToken, requestUserId)
+      const loaded = await loadUserPlaylist(requestToken, requestUserId, options)
       if (!loaded || !isLibraryRequestActive(requestToken, requestUserId)) return false
       listType2.value = typeOne.value == 0 ? 0 : 1
       changeLibraryList(typeOne.value == 0 ? 0 : 1)
@@ -232,6 +252,13 @@
   }
 
   watch(
+    () => userStore.localOnlyMode,
+    enabled => {
+      changeTracker(enabled ? 3 : 0)
+    }
+  )
+
+  watch(
     () => user.value?.userId ?? null,
     (nextUserId, previousUserId) => {
       if (nextUserId === previousUserId) return
@@ -243,11 +270,16 @@
   )
 
   watch(
+    () => [userStore.favoritePlaylistId, Array.isArray(userStore.likelist) ? userStore.likelist.length : null],
+    syncFavoritePlaylistTrackCount
+  )
+
+  watch(
     () => playlistOverviewVersion.value,
     version => {
       if (version === lastHandledPlaylistOverviewVersion.value) return
       if (option.value != 0) return
-      void refreshCurrentSection()
+      void refreshCurrentSection({ silent: playlistOverviewRefreshSilent.value })
     }
   )
 
@@ -256,11 +288,11 @@
     const needsUserReload = (option.value == 0 || option.value == 1) && currentUserId && lastLoadedUserId.value !== currentUserId
     const needsPlaylistOverviewReload = option.value == 0 && playlistOverviewVersion.value !== lastHandledPlaylistOverviewVersion.value
     if (needsUserReload || needsPlaylistOverviewReload) {
-      void refreshCurrentSection()
+      void refreshCurrentSection({ silent: needsPlaylistOverviewReload && playlistOverviewRefreshSilent.value })
     }
   })
 
-  changeTracker(0)
+  changeTracker(userStore.localOnlyMode ? 3 : 0)
 </script>
 
 <template>
@@ -268,14 +300,14 @@
     <div class="library-type">
         <div class="type-one">
             <div class="type-option">
-            <span class="option" :class="{'option-selected': option == 0}" @click="changeTracker(0)" id="myPlaylist">歌单</span>
-            <span class="option" :class="{'option-selected': option == 1}" @click="changeTracker(1)">收藏</span>
-            <span class="option" :class="{'option-selected': option == 2}" @click="changeTracker(2)">下载管理</span>
+            <span v-if="!userStore.localOnlyMode" class="option" :class="{'option-selected': option == 0}" @click="changeTracker(0)" id="myPlaylist">歌单</span>
+            <span v-if="!userStore.localOnlyMode" class="option" :class="{'option-selected': option == 1}" @click="changeTracker(1)">收藏</span>
+            <span v-if="!userStore.localOnlyMode" class="option" :class="{'option-selected': option == 2}" @click="changeTracker(2)">下载管理</span>
             <span class="option" :class="{'option-selected': option == 3}" @click="changeTracker(3)">本地管理</span>
             </div>
             <div class="option-tracker">
             <div class="tracker-line"></div>
-            <div :class="{'tracker': true, 'tracker0': typeTracker == 0, 'tracker1': typeTracker == 1, 'tracker2': typeTracker == 2, 'tracker3': typeTracker == 3}"></div>
+            <div :class="{'tracker': true, 'tracker0': typeTracker == 0, 'tracker1': typeTracker == 1, 'tracker2': typeTracker == 2, 'tracker3': typeTracker == 3, 'tracker-local-only': userStore.localOnlyMode}"></div>
             </div>
         </div>
         <div class="type-two">
@@ -355,6 +387,9 @@
             .tracker3{
                 width: 64Px;
                 left: 193Px;
+            }
+            .tracker-local-only{
+                left: 4Px;
             }
         }
     }

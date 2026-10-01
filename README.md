@@ -137,6 +137,7 @@ Hydrogen Music 是一个第三方桌面音乐播放器。当前仓库在原 Hydr
 - Windows：NSIS 安装包、Portable、Zip。
 - macOS：DMG。
 - Linux：AppImage、Deb、RPM。
+- Android：APK、AAB，工程位于 [`apps/android/`](apps/android/README.md)，与桌面端共用产品版本，使用 Android 签名配置。
 
 Arch Linux 用户可通过 AUR 安装：
 
@@ -174,6 +175,19 @@ npm start
 ```
 
 开发环境下主窗口会加载 `http://localhost:5173/`，桌面歌词窗口会加载 `http://localhost:5173/desktop-lyric.html`。应用内置网易云 API 服务默认使用本地端口 `36530`。
+
+### Android 开发与发行
+
+Android 源码位于 [`apps/android/`](apps/android/README.md)，使用 Vue 3 + Capacitor，内嵌网易云 API，可独立运行。两端共用字体、图片和 API 补丁，Android 界面与原生代码在子目录维护。
+
+```shell
+npm run android:install  # 安装 Android 依赖
+npm run android:api      # 启动浏览器开发所需的 API
+npm run android:dev      # 另一终端启动手机界面预览
+npm run android:build    # 构建 debug APK（需 JDK 21 和 Android SDK）
+```
+
+正式发行使用 `npm run android:release`（APK）或 `npm run android:bundle`（AAB）。签名配置、SDK 要求和 `android-v*` 独立发行工作流见 [Android 文档](apps/android/README.md)。原有 Windows/macOS/Linux 构建命令继续使用。
 
 ### 本地 HiFi 输出与 MPV 后端
 
@@ -285,5 +299,7 @@ Hydrogen-Music
 本项目仅供个人学习与研究使用，禁止用于商业用途或任何非法用途。项目内涉及的音乐、歌词、评论、图片、视频等内容版权归其权利方所有。
 
 本仓库基于原 [Hydrogen-Music](https://github.com/Kaidesuyo/Hydrogen-Music) 的创意与方向继续维护，感谢原作者的设计与实现。如原作者或相关权利方认为本仓库存在不妥，请联系维护者处理。
+
+感谢 [1CYcat1（CY · 羟醛缩合可以增长碳链）](https://github.com/1CYcat1) 提供 Android 移植、原生媒体控制与移动端适配。相关贡献通过 [PR #64](https://github.com/ldx123000/Hydrogen-Music/pull/64) 整合至 [`apps/android/`](apps/android/README.md)。
 
 代码基于 [MIT License](LICENSE) 开源。

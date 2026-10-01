@@ -1,5 +1,5 @@
 <script setup>
-  import { onMounted, ref } from 'vue'
+  import { onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
   import { playAll } from '../utils/player/lazy';
   import { useRouter } from 'vue-router';
   import { useLibraryStore } from '../store/libraryStore'
@@ -9,16 +9,44 @@
   const libraryStore = useLibraryStore()
   const localStore = useLocalStore()
   const router = useRouter()
-  const recTime = ref()
+  const recTime = ref('')
   const showMore = ref(false)
   const showMoreTitle = ref('每 日推 荐')
-  let m = new Date().getMonth() + 1
-  let d = new Date().getDate()
+  let dateRefreshTimer = null
+
+  const scheduleDateRefresh = () => {
+    if(dateRefreshTimer) clearTimeout(dateRefreshTimer)
+
+    const now = new Date()
+    const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const delay = Math.max(nextMidnight.getTime() - now.getTime() + 100, 1000)
+    dateRefreshTimer = setTimeout(refreshRecommendationDate, delay)
+  }
+
+  const refreshRecommendationDate = () => {
+    const now = new Date()
+    const month = `${now.getMonth() + 1}`.padStart(2, '0')
+    const day = `${now.getDate()}`.padStart(2, '0')
+    recTime.value = `${month} ${day}`
+    scheduleDateRefresh()
+  }
+
+  const handleVisibilityChange = () => {
+    if(document.visibilityState == 'visible') refreshRecommendationDate()
+  }
 
   onMounted(() => {
-    if(m < 10) m = '0' + m
-    if(d < 10) d = '0' + d
-    recTime.value = m + ' ' + d
+    refreshRecommendationDate()
+    window.addEventListener('focus', refreshRecommendationDate)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+  })
+
+  onActivated(refreshRecommendationDate)
+
+  onBeforeUnmount(() => {
+    if(dateRefreshTimer) clearTimeout(dateRefreshTimer)
+    window.removeEventListener('focus', refreshRecommendationDate)
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
   })
 
   const more = (flag) => {
@@ -56,7 +84,7 @@
     </div>
     <div class="rec-middle">
         <div class="rec-play-background">
-            <svg class="rec-play" @click.stop="playRecAll()" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200" viewBox="0 0 200 200" fill="none"><defs><rect id="path_0" x="0" y="0" width="200" height="200"/></defs><g opacity="1" transform="translate(0 0)  rotate(0 100 100)"><mask id="bg-mask-0" fill="white"><use xlink:href="#path_0"/></mask><g mask="url(#bg-mask-0)"><path id="play" fill-rule="evenodd" style="fill:#E4EFF2" transform="translate(-5.999999999999972 -2.842170943040401e-14)  rotate(90 99.99999999999997 100)" opacity="1" d="M13.4,150L186.6,150L100,0L13.4,150Z "/><path id="play" style="stroke:#000000; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(-5.999999999999972 -2.842170943040401e-14)  rotate(90 99.99999999999997 100)" d="M13.4,150L186.6,150L100,0L13.4,150Z "/></g></g></svg>
+            <svg class="rec-play" @click.stop="playRecAll()" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200" viewBox="10 -9 217 217" fill="none"><defs><rect id="path_0" x="0" y="0" width="200" height="200"/></defs><g opacity="1" transform="translate(0 0)  rotate(0 100 100)"><mask id="bg-mask-0" fill="white"><use xlink:href="#path_0"/></mask><g mask="url(#bg-mask-0)"><path id="play" fill-rule="evenodd" style="fill:#E4EFF2" transform="translate(-5.999999999999972 -2.842170943040401e-14)  rotate(90 99.99999999999997 100)" opacity="1" d="M13.4,150L186.6,150L100,0L13.4,150Z "/><path id="play" style="stroke:#000000; stroke-width:8; stroke-opacity:1; stroke-dasharray:0 0" transform="translate(-5.999999999999972 -2.842170943040401e-14)  rotate(90 99.99999999999997 100)" d="M13.4,150L186.6,150L100,0L13.4,150Z "/></g></g></svg>
             <div class="rec-play-border rec-play-border1"></div>
             <div class="rec-play-border rec-play-border2"></div>
             <div class="rec-play-border rec-play-border3"></div>

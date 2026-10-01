@@ -63,6 +63,7 @@ let deferredInitScheduled = false
 let mediaSessionInitialized = false
 let sirenDurationPreloadScheduled = false
 let lastSongRestoreScheduled = false
+let lastSongRestorePromise = null
 let localMusicModulePromise = null
 let downloadManagerModulePromise = null
 let customFontResolveToken = 0
@@ -335,12 +336,13 @@ export async function initSettings(options = {}) {
 }
 
 function restoreLastSongOnce() {
-    if (lastSongRestoreScheduled) return
+    if (lastSongRestoreScheduled) return lastSongRestorePromise || Promise.resolve()
     lastSongRestoreScheduled = true
-    void loadLastSong().catch(error => {
+    lastSongRestorePromise = loadLastSong().catch(error => {
         lastSongRestoreScheduled = false
         console.error('恢复上次播放失败:', error)
     })
+    return lastSongRestorePromise
 }
 
 function resetStartupPlayerState() {
@@ -405,15 +407,18 @@ async function runDeferredAppInit() {
     const settings = await initSettings({ hydrateLocalMusic: true })
     const mediaSessionReadyPromise = ensureMediaSessionReady()
 
-    try {
-        await initializeCurrentAccountSession()
-    } catch (error) {
-        console.error('用户信息加载失败:', error)
-    } finally {
-        restoreLastSongOnce()
+    if (!userStore.localOnlyMode) {
+        try {
+            await initializeCurrentAccountSession()
+        } catch (error) {
+            console.error('用户信息加载失败:', error)
+        }
     }
 
-    scheduleSirenDurationPreload()
+    await restoreLastSongOnce()
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('listenTogether:startup-ready'))
+
+    if (!userStore.localOnlyMode) scheduleSirenDurationPreload()
     await mediaSessionReadyPromise
     return settings
 }

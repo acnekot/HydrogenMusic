@@ -1,6 +1,7 @@
 <script setup>
 import { computed, defineAsyncComponent, onMounted, onUnmounted } from 'vue';
 import Home from './views/Home.vue';
+import ListenTogetherRuntime from './components/ListenTogetherRuntime.vue';
 import Title from './components/Title.vue';
 import SearchInput from './components/SearchInput.vue';
 import WindowControl from './components/WindowControl.vue';
@@ -8,9 +9,11 @@ import MusicWidget from './components/MusicWidget.vue';
 import CustomBackgroundLayer from './components/CustomBackgroundLayer.vue';
 import { destroyDesktopLyric, initDesktopLyric } from './utils/desktopLyric';
 import { destroyLyricRuntime, initLyricRuntime } from './composables/usePlayerRuntime';
+import { usePlaylistSync } from './composables/usePlaylistSync';
 
 import { usePlayerStore } from './store/playerStore';
 import { useOtherStore } from './store/otherStore';
+import { useUserStore } from './store/userStore';
 
 const MusicPlayer = defineAsyncComponent(() => import('./views/MusicPlayer.vue'));
 const VideoPlayer = defineAsyncComponent(() => import('./components/VideoPlayer.vue'));
@@ -26,6 +29,8 @@ const customBackgroundChromeActive = computed(() => (
     && playerStore.customBackgroundApplyToChrome
     && !!playerStore.customBackgroundImage
 ));
+const userStore = useUserStore();
+usePlaylistSync();
 const removeCheckUpdateListener = windowApi.checkUpdate((version) => {
     otherStore.toUpdate = true;
     otherStore.newVersion = version;
@@ -49,6 +54,7 @@ const handleTitleBarDoubleClick = () => {
 </script>
 
 <template>
+    <ListenTogetherRuntime />
     <div class="mainWindow">
         <CustomBackgroundLayer
             :active="customBackgroundChromeActive"
@@ -63,7 +69,7 @@ const handleTitleBarDoubleClick = () => {
     </div>
     <div class="globalWidget">
         <Title class="widget-title"></Title>
-        <div class="widget-search">
+        <div class="widget-search" v-if="!userStore.localOnlyMode">
             <SearchInput></SearchInput>
         </div>
     </div>
@@ -227,12 +233,26 @@ const handleTitleBarDoubleClick = () => {
     z-index: 999;
 }
 
-.home-enter-active,
+.home-enter-active {
+    transition: opacity 0.4s cubic-bezier(0.14, 0.91, 0.58, 1);
+}
+
+.home-enter-active .home-content {
+    transition: transform 0.4s cubic-bezier(0.14, 0.91, 0.58, 1);
+}
+
+.home-enter-from {
+    opacity: 0;
+}
+
+.home-enter-from .home-content {
+    transform: scale(0.9);
+}
+
 .home-leave-active {
     transition: 0.4s cubic-bezier(0.14, 0.91, 0.58, 1);
 }
 
-.home-enter-from,
 .home-leave-to {
     transform: scale(0.9);
     opacity: 0;

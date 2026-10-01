@@ -95,6 +95,7 @@
     ],
     "other": {
       "globalShortcuts": true,
+      "rememberWindowSize": true,
       "quitApp": "minimize",
       "globalZoom": 1,
       "customFont": "",

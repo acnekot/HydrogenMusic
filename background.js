@@ -2,15 +2,14 @@ require('./src/electron/logSanitizer')()
 
 const startNeteaseMusicApi = require('./src/electron/services')
 
-const { app, BrowserWindow, globalShortcut, Menu, ipcMain, session, shell } = require('electron')
+const { app, BrowserWindow, globalShortcut, Menu, ipcMain, session, shell, screen } = require('electron')
 const path = require('path')
+const { createMainWindowState } = require('./src/electron/windowState')
 
 
 let myWindow = null
 let lyricWindow = null
 let forceQuit = false;
-const MAIN_WINDOW_MIN_WIDTH = 1080
-const MAIN_WINDOW_MIN_HEIGHT = 672
 const isSmokeTest = process.env.HYDROGENMUSIC_SMOKE_TEST === '1'
 const isDevServer = () => !isSmokeTest && process.resourcesPath.indexOf(path.join('node_modules')) != -1
 // 标记是否为“设置里手动检查更新”流程，以避免弹出大窗
@@ -212,16 +211,13 @@ const createWindow = () => {
 
     process.env.DIST = path.join(__dirname, './')
     const indexHtml = path.join(process.env.DIST, 'dist/index.html')
-    const Winstate = require('electron-win-state').default
-    const winstate = new Winstate({
-        //自定义默认窗口大小
-        defaultWidth: MAIN_WINDOW_MIN_WIDTH,
-        defaultHeight: MAIN_WINDOW_MIN_HEIGHT,
-    })
+    const Store = require('electron-store').default
+    const settingsStore = new Store({ name: 'settings' })
+    const windowStateStore = new Store({ name: 'window-state' })
+    const windowState = createMainWindowState(settingsStore, windowStateStore, screen.getPrimaryDisplay().workAreaSize)
     const isMac = process.platform === 'darwin'
     const win = new BrowserWindow({
-        minWidth: MAIN_WINDOW_MIN_WIDTH,
-        minHeight: MAIN_WINDOW_MIN_HEIGHT,
+        ...windowState.windowOptions,
         // macOS 使用原生交通灯；其他平台仍用自定义无边框
         frame: isMac ? true : false,
         titleBarStyle: isMac ? 'hiddenInset' : undefined,
@@ -229,8 +225,6 @@ const createWindow = () => {
         title: "Hydrogen Music",
         icon: path.resolve(__dirname, './src/assets/icon/' + (process.platform === 'win32' ? 'icon.ico' : 'icon.png')),
         backgroundColor: '#fff',
-        //记录窗口大小
-        ...winstate.winOptions,
         show: false,
         webPreferences: {
             //预加载脚本
@@ -244,6 +238,7 @@ const createWindow = () => {
         }
     })
     myWindow = win
+    const restoreWindowState = windowState.manage(win)
 
     win.webContents.setWindowOpenHandler(({ url }) => {
         try {
@@ -299,6 +294,7 @@ const createWindow = () => {
         if (!win || win.isDestroyed() || hasShownMainWindow) return
         hasShownMainWindow = true
         if (isSmokeTest) return
+        restoreWindowState()
         win.show()
         // 微调 macOS 交通灯位置以匹配自定义布局高度
         try {
@@ -410,7 +406,6 @@ const createWindow = () => {
             initPostShowFeatures()
         }
     }, 2500)
-    winstate.manage(win)
     win.on('close', (event) => {
         if (forceQuit) {
             // 如果是强制退出 (Cmd+Q)，则不阻止默认行为

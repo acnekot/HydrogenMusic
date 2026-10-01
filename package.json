@@ -1,7 +1,7 @@
 {
   "name": "hydrogenmusic",
   "private": true,
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "A modern music player built with Electron and Vue.js",
   "main": "background.js",
   "author": {
@@ -20,14 +20,23 @@
     "_dist": "vite build && node scripts/build.js -p always",
     "dist": "vite build && node scripts/build.js -p never",
     "mpv:download": "node scripts/mpv-audio-only/download-artifacts.cjs",
-    "mpv:download:all": "node scripts/mpv-audio-only/download-artifacts.cjs --platform all"
+    "mpv:download:all": "node scripts/mpv-audio-only/download-artifacts.cjs --platform all",
+    "android:install": "npm ci --prefix apps/android && npm ci --prefix apps/android/mobile-runtime --omit=dev",
+    "android:dev": "npm --prefix apps/android run dev",
+    "android:api": "npm --prefix apps/android run api",
+    "android:web": "npm --prefix apps/android run build",
+    "android:sync": "npm --prefix apps/android run sync",
+    "android:build": "npm --prefix apps/android run android:build",
+    "android:release": "npm --prefix apps/android run android:release",
+    "android:bundle": "npm --prefix apps/android run android:bundle",
+    "android:open": "npm --prefix apps/android run android:open",
+    "android:inspect": "npm --prefix apps/android run inspect --"
   },
   "dependencies": {
     "@neteasecloudmusicapienhanced/api": "^4.35.1",
     "axios": "^1.12.2",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.6.2",
-    "electron-win-state": "^1.1.22",
     "ffmpeg-static": "^5.2.0",
     "fs-extra": "^11.3.2",
     "iconv-lite": "^0.6.3",

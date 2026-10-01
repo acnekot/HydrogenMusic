@@ -1,4 +1,5 @@
 <script setup>
+const appVersion = __APP_VERSION__
 import { computed, ref, onActivated, onBeforeUnmount, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { noticeOpen, dialogOpen } from '@/utils/dialog'
@@ -12,8 +13,9 @@ import FontSelector from '../components/FontSelector.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
 import AppearanceSettings from '../components/settings/AppearanceSettings.vue'
 import { setTheme, getSavedTheme } from '@/utils/theme'
-import { confirmAccountLogout } from '@/utils/accountSession'
-import { getSettingsSnapshot, setCachedSettingsSnapshot } from '@/utils/settingsSnapshot'
+import { confirmAccountLogout, initializeCurrentAccountSession } from '@/utils/accountSession'
+import { applyCurrentHifiOutputSettings, enforceLocalOnlyPlayback, restoreOnlinePlayback } from '@/utils/player/lazy'
+import { getCachedSettingsSnapshot, getSettingsSnapshot, setCachedSettingsSnapshot } from '@/utils/settingsSnapshot'
 import { applyCustomFontStyle, syncDesktopLyricCustomFont } from '@/utils/setFont'
 import { buildFontOptions, loadSystemFontOptions, resolveSystemFontLabel, resolveSystemFontValue } from '@/utils/fontResolver'
 import { markHifiOutputModeConfigured, resolveInitialHifiOutputMode } from '@/utils/hifiOutputModeMigration'
@@ -34,6 +36,8 @@ const rlyricSize = ref(12)
 const lyricInterlude = ref(13)
 const searchAssistLimit = ref(8)
 const globalShortcuts = ref(false)
+const rememberWindowSize = ref(false)
+const rememberWindowSizeSaving = ref(false)
 const quitApp = ref('minimize')
 const quitAppOptions = ref([
     {
@@ -119,7 +123,7 @@ const LOCAL_HIFI_OUTPUT_CONFIRM_MESSAGE = '开启后本地音乐会使用 MPV �
 
 const loadVipInfo = async () => {
     const requestUserId = userStore.user?.userId
-    if (!requestUserId || !isLogin()) {
+    if (userStore.localOnlyMode || !requestUserId || !isLogin()) {
         vipInfo.value = null
         return
     }
@@ -173,6 +177,7 @@ const applySettingsToForm = settings => {
     localFolder.value = normalizedSettings.local.localFolder
     shortcutsList.value = normalizedSettings.shortcuts
     globalShortcuts.value = normalizedSettings.other.globalShortcuts
+    rememberWindowSize.value = normalizedSettings.other.rememberWindowSize
     quitApp.value = normalizedSettings.other.quitApp
     customFont.value = normalizedSettings.other.customFont
     customFontLabel.value = normalizedSettings.other.customFontLabel
@@ -301,6 +306,7 @@ const setAppSettings = () => {
         shortcuts: shortcutsList.value,
         other: {
             globalShortcuts: globalShortcuts.value,
+            rememberWindowSize: rememberWindowSize.value,
             quitApp: quitApp.value,
             customFont: customFont.value,
             customFontLabel: customFont.value ? customFontLabel.value : '',
@@ -327,6 +333,26 @@ const setAppSettings = () => {
 
 const saveSettings = () => {
     initSettings({ settings: setAppSettings(), hydrateLocalMusic: true })
+}
+
+const toggleRememberWindowSize = async () => {
+    if (rememberWindowSizeSaving.value) return
+    const previousValue = rememberWindowSize.value
+    rememberWindowSize.value = !previousValue
+    rememberWindowSizeSaving.value = true
+    try {
+        const settings = await windowApi.setRememberWindowSize(rememberWindowSize.value)
+        rememberWindowSize.value = settings.other.rememberWindowSize
+        const snapshot = getCachedSettingsSnapshot() || settings
+        snapshot.other.rememberWindowSize = rememberWindowSize.value
+        setCachedSettingsSnapshot(snapshot)
+    } catch (error) {
+        rememberWindowSize.value = previousValue
+        console.error('保存窗口记忆设置失败:', error)
+        noticeOpen('保存设置失败，请重试', 2)
+    } finally {
+        rememberWindowSizeSaving.value = false
+    }
 }
 
 const setCustomFont = (font, option = null) => {
@@ -567,6 +593,7 @@ const refreshHifiOutputBackend = async () => {
 const setLocalHifiOutput = async () => {
     if (playerStore.localHifiOutput) {
         playerStore.localHifiOutput = false
+        await applyCurrentHifiOutputSettings()
         return
     }
 
@@ -580,6 +607,7 @@ const setLocalHifiOutput = async () => {
         if (!flag) return
         playerStore.localHifiOutput = true
         void loadHifiAudioDevices()
+        void applyCurrentHifiOutputSettings()
     })
 }
 const selectHifiMpvPath = async () => {
@@ -658,12 +686,27 @@ const clearFmRecent = () => {
         noticeOpen('清空失败', 2)
     }
 }
+
+const toggleLocalOnlyMode = async () => {
+    userStore.localOnlyMode = !userStore.localOnlyMode
+    if (userStore.localOnlyMode) {
+        vipInfo.value = null
+        await enforceLocalOnlyPlayback()
+        noticeOpen('已切换为仅本地音乐模式', 2)
+        return
+    }
+
+    await restoreOnlinePlayback()
+    await initializeCurrentAccountSession()
+    await loadVipInfo()
+    noticeOpen('已恢复在线音乐功能', 2)
+}
 </script>
 
 <template>
     <div class="settings-page" @click="selectedShortcut = null">
         <div class="view-control">
-            <svg t="1669039513804" @click="routerChange()" class="router-last" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="1053" width="200" height="200">
+            <svg t="1669039513804" @click="routerChange()" class="router-last" viewBox="-107 -86 1195 1195" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="1053" width="200" height="200">
                 <path d="M716.608 1010.112L218.88 512.384 717.376 13.888l45.248 45.248-453.248 453.248 452.48 452.48z" p-id="1054"></path>
             </svg>
             <span class="setting-title">
@@ -674,7 +717,7 @@ const clearFmRecent = () => {
         </div>
         <div class="settings-container">
             <h1 class="settings-title">设置</h1>
-            <div class="settings-user-info" v-if="isLogin()">
+            <div class="settings-user-info" v-if="!userStore.localOnlyMode && isLogin()">
                 <div class="user">
                     <div class="user-head">
                         <img :src="userStore.user.avatarUrl + '?param=300y300'" alt="" />
@@ -695,7 +738,7 @@ const clearFmRecent = () => {
                     <h2 class="item-title">音乐</h2>
                     <div class="line"></div>
                     <div class="item-options">
-                        <div class="option">
+                        <div class="option" v-if="!userStore.localOnlyMode">
                             <div class="option-name">音质选择</div>
                             <div class="option-operation">
                                 <Selector v-model="musicLevel" :options="musicLevelOptions" :maxItems="9"></Selector>
@@ -772,7 +815,7 @@ const clearFmRecent = () => {
                                 <input v-model="lyricInterlude" name="lyricInterlude" />
                             </div>
                         </div>
-                        <div class="option">
+                        <div class="option" v-if="!userStore.localOnlyMode">
                             <div class="option-name">开启音乐视频功能</div>
                             <div class="option-operation">
                                 <div class="toggle" @click="setMusicVideo()">
@@ -783,7 +826,7 @@ const clearFmRecent = () => {
                                 </div>
                             </div>
                         </div>
-                        <div class="option" v-if="playerStore.musicVideo">
+                        <div class="option" v-if="!userStore.localOnlyMode && playerStore.musicVideo">
                             <div class="option-name">删除所有未被使用的音乐视频</div>
                             <div class="option-operation">
                                 <div class="button" @click="clearMusicVideo()">清除</div>
@@ -795,6 +838,17 @@ const clearFmRecent = () => {
                     <h2 class="item-title">本地</h2>
                     <div class="line"></div>
                     <div class="item-options">
+                        <div class="option">
+                            <div class="option-name">仅本地音乐模式</div>
+                            <div class="option-operation">
+                                <div class="toggle" @click="toggleLocalOnlyMode()">
+                                    <div class="toggle-off" :class="{ 'toggle-on-in': userStore.localOnlyMode }">{{ userStore.localOnlyMode ? '已开启' : '已关闭' }}</div>
+                                    <Transition name="toggle">
+                                        <div class="toggle-on" v-show="userStore.localOnlyMode"></div>
+                                    </Transition>
+                                </div>
+                            </div>
+                        </div>
                         <div class="option">
                             <div class="option-name">本地音乐 HiFi 输出</div>
                             <div class="option-operation">
@@ -809,7 +863,11 @@ const clearFmRecent = () => {
                         <div class="option" v-if="playerStore.localHifiOutput">
                             <div class="option-name">本地 HiFi 输出模式</div>
                             <div class="option-operation">
-                                <Selector v-model="playerStore.localHifiOutputMode" :options="localHifiOutputModeOptions"></Selector>
+                                <Selector
+                                    v-model="playerStore.localHifiOutputMode"
+                                    :options="localHifiOutputModeOptions"
+                                    @change="applyCurrentHifiOutputSettings"
+                                ></Selector>
                             </div>
                         </div>
                         <div class="option" v-if="playerStore.localHifiOutput">
@@ -822,6 +880,7 @@ const clearFmRecent = () => {
                                     :searchable="true"
                                     :optionWidth="280"
                                     @open="loadHifiAudioDevices"
+                                    @change="applyCurrentHifiOutputSettings"
                                 ></Selector>
                             </div>
                         </div>
@@ -836,21 +895,21 @@ const clearFmRecent = () => {
                                 <div class="select-option" v-if="playerStore.localHifiMpvPath" @click="clearHifiMpvPath">清除</div>
                             </div>
                         </div>
-                        <div class="option" v-if="playerStore.musicVideo">
+                        <div class="option" v-if="!userStore.localOnlyMode && playerStore.musicVideo">
                             <div class="option-name">音乐视频缓存</div>
                             <div class="select-download-folder">
                                 <div class="selected-folder" :title="videoFolder">{{ videoFolder ? videoFolder : '待选择' }}</div>
                                 <div class="select-option" @click="selectFolder('video')">选择</div>
                             </div>
                         </div>
-                        <div class="option">
+                        <div class="option" v-if="!userStore.localOnlyMode">
                             <div class="option-name">下载目录</div>
                             <div class="select-download-folder">
                                 <div class="selected-folder" :title="downloadFolder">{{ downloadFolder ? downloadFolder : '待选择' }}</div>
                                 <div class="select-option" @click="selectFolder('download')">选择</div>
                             </div>
                         </div>
-                        <div class="option">
+                        <div class="option" v-if="!userStore.localOnlyMode">
                             <div class="option-name">下载歌曲时创建独立文件夹</div>
                             <div class="option-operation">
                                 <div class="toggle" @click="downloadCreateSongFolder = !downloadCreateSongFolder">
@@ -861,7 +920,7 @@ const clearFmRecent = () => {
                                 </div>
                             </div>
                         </div>
-                        <div class="option">
+                        <div class="option" v-if="!userStore.localOnlyMode">
                             <div class="option-name">下载歌曲时创建独立歌词文件</div>
                             <div class="option-operation">
                                 <div class="toggle" @click="downloadSaveLyricFile = !downloadSaveLyricFile">
@@ -940,7 +999,7 @@ const clearFmRecent = () => {
                                 <FontSelector v-model="customFont" :options="fontOptions" :loading="systemFontsLoading" @open="loadSystemFonts" @change="setCustomFont"></FontSelector>
                             </div>
                         </div>
-                        <div class="option">
+                        <div class="option" v-if="!userStore.localOnlyMode">
                             <div class="option-name">开启首页页面</div>
                             <div class="option-operation">
                                 <div class="toggle" @click="userStore.homePage = !userStore.homePage">
@@ -951,7 +1010,7 @@ const clearFmRecent = () => {
                                 </div>
                             </div>
                         </div>
-                        <div class="option">
+                        <div class="option" v-if="!userStore.localOnlyMode">
                             <div class="option-name">开启云盘页面</div>
                             <div class="option-operation">
                                 <div class="toggle" @click="userStore.cloudDiskPage = !userStore.cloudDiskPage">
@@ -962,7 +1021,7 @@ const clearFmRecent = () => {
                                 </div>
                             </div>
                         </div>
-                        <div class="option">
+                        <div class="option" v-if="!userStore.localOnlyMode">
                             <div class="option-name">开启私人漫游页面</div>
                             <div class="option-operation">
                                 <div class="toggle" @click="userStore.personalFMPage = !userStore.personalFMPage">
@@ -973,7 +1032,7 @@ const clearFmRecent = () => {
                                 </div>
                             </div>
                         </div>
-                        <div class="option">
+                        <div class="option" v-if="!userStore.localOnlyMode">
                             <div class="option-name">开启塞壬唱片页面</div>
                             <div class="option-operation">
                                 <div class="toggle" @click="userStore.sirenPage = !userStore.sirenPage">
@@ -984,10 +1043,21 @@ const clearFmRecent = () => {
                                 </div>
                             </div>
                         </div>
-                        <div class="option" v-if="userStore.personalFMPage">
+                        <div class="option" v-if="!userStore.localOnlyMode && userStore.personalFMPage">
                             <div class="option-name">清空漫游缓存</div>
                             <div class="option-operation">
                                 <div class="button" @click="clearFmRecent">清空</div>
+                            </div>
+                        </div>
+                        <div class="option">
+                            <div class="option-name">记住窗口大小</div>
+                            <div class="option-operation">
+                                <div class="toggle" :aria-disabled="rememberWindowSizeSaving" @click="toggleRememberWindowSize">
+                                    <div class="toggle-off" :class="{ 'toggle-on-in': rememberWindowSize }">{{ rememberWindowSize ? '已开启' : '已关闭' }}</div>
+                                    <Transition name="toggle">
+                                        <div class="toggle-on" v-show="rememberWindowSize"></div>
+                                    </Transition>
+                                </div>
                             </div>
                         </div>
                         <div class="option">
@@ -1003,7 +1073,7 @@ const clearFmRecent = () => {
                 <div class="app-icon">
                     <img src="../assets/icon/icon.ico" alt="" />
                 </div>
-                <div class="version">V0.6.2</div>
+                <div class="version">V{{ appVersion }}</div>
                 <div class="update-check">
                     <button class="check-update-btn" @click="checkForUpdates">检查更新</button>
                 </div>
@@ -1036,7 +1106,7 @@ const clearFmRecent = () => {
         flex-direction: row;
         align-items: center;
         svg {
-            padding: 8px;
+            padding: 4px;
             width: 32px;
             height: 32px;
             float: left;
